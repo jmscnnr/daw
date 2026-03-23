@@ -1,4 +1,4 @@
-import type { PluginDescriptor, PluginInstance } from "@/types/plugin";
+import type { PluginInstance, PluginContext } from "@/types/plugin";
 import { getPlugin } from "./plugin-registry";
 
 /**
@@ -6,20 +6,13 @@ import { getPlugin } from "./plugin-registry";
  */
 export async function createPluginInstance(
   pluginId: string,
-  ctx: AudioContext,
+  ctx: PluginContext,
 ): Promise<PluginInstance> {
   const descriptor = getPlugin(pluginId);
   if (!descriptor) {
     throw new Error(`Plugin not found: ${pluginId}`);
   }
-  return createPluginFromDescriptor(descriptor, ctx);
-}
-
-export async function createPluginFromDescriptor(
-  descriptor: PluginDescriptor,
-  ctx: AudioContext,
-): Promise<PluginInstance> {
   const instance = await descriptor.createInstance(ctx);
-  await instance.initialize();
+  instance.activate();
   return instance;
 }

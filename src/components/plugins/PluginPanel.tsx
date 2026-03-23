@@ -1,6 +1,8 @@
 "use client";
 
 import type { PluginInstance } from "@/types/plugin";
+import { SYNTH_PLUGIN_ID } from "@/audio/plugins/builtin/synth-plugin";
+import { SynthPluginUI } from "@/components/synth/SynthPluginUI";
 
 interface PluginPanelProps {
   trackId: string | null;
@@ -25,11 +27,13 @@ export function PluginPanel({ trackId, getTrackPlugin }: PluginPanelProps) {
     );
   }
 
-  const UIComponent = plugin.getUIComponent();
-  if (UIComponent) {
+  if (plugin.descriptor.id === SYNTH_PLUGIN_ID) {
     return (
       <div className="h-full overflow-auto p-2">
-        <UIComponent instance={plugin} />
+        <SynthPluginUI
+          key={`${trackId}:${plugin.descriptor.id}`}
+          instance={plugin}
+        />
       </div>
     );
   }
