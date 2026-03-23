@@ -60,17 +60,17 @@ export class BiquadFilter {
     this.a2 = (1.0 - alpha) / a0;
   }
 
+  /** Process the buffer in-place and return it. */
   process(x: Float32Array): Float32Array {
     if (!this.active) return x;
 
-    const y = new Float32Array(x.length);
     const { b0, b1, b2, a1, a2 } = this;
     let { x1, x2, y1, y2 } = this;
 
     for (let i = 0; i < x.length; i++) {
       const x0 = x[i]!;
       const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      y[i] = y0;
+      x[i] = y0;
       x2 = x1;
       x1 = x0;
       y2 = y1;
@@ -81,6 +81,6 @@ export class BiquadFilter {
     this.x2 = x2;
     this.y1 = y1;
     this.y2 = y2;
-    return y;
+    return x;
   }
 }

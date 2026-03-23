@@ -1,18 +1,28 @@
 import type { WorkletMessage, WorkletResponse, OscConfig } from "./types";
-import { useAudioDisplayStore } from "@/stores/audio-display-store";
+import { EMPTY_AUDIO_DISPLAY, type PluginAudioDisplayState } from "@/types/plugin";
+import {
+  AudioContext,
+  AudioWorkletNode,
+  type IAudioContext,
+  type IAudioWorkletNode,
+} from "standardized-audio-context";
+import type { PluginContext } from "@/types/plugin";
 
 export class SynthEngine {
-  private ctx: AudioContext | null = null;
-  private workletNode: AudioWorkletNode | null = null;
+  private ctx: PluginContext | null = null;
+  private workletNode: IAudioWorkletNode<PluginContext> | null = null;
   private initialized = false;
   private ownsContext = false;
+  private displayState: PluginAudioDisplayState = EMPTY_AUDIO_DISPLAY;
+  private onDisplayUpdate: ((state: PluginAudioDisplayState) => void) | null =
+    null;
 
   /**
    * Initialize the synth engine.
    * @param ctx - External AudioContext from the DAW engine.
    *              If omitted, creates its own (standalone mode).
    */
-  async init(ctx?: AudioContext): Promise<void> {
+  async init(ctx?: PluginContext): Promise<void> {
     if (this.initialized) return;
 
     if (!window.isSecureContext) {
@@ -46,6 +56,9 @@ export class SynthEngine {
       // Module may already be registered — that's fine.
     }
 
+    if (!AudioWorkletNode) {
+      throw new Error("AudioWorklet is not supported in this browser.");
+    }
     this.workletNode = new AudioWorkletNode(this.ctx, "synth-processor");
 
     // In standalone mode, connect to destination.
@@ -58,12 +71,28 @@ export class SynthEngine {
       event: MessageEvent<WorkletResponse>,
     ) => {
       const msg = event.data;
-      if (msg.type === "waveform") {
-        useAudioDisplayStore.getState().setWaveform(msg.data);
+      if (msg.type === "update") {
+        // Batched message — handle all fields at once
+        this.setDisplayState({
+          waveformData: msg.waveform,
+          activeNotes: msg.notes,
+          levelDb: msg.db,
+        });
+      } else if (msg.type === "waveform") {
+        this.setDisplayState({
+          ...this.displayState,
+          waveformData: msg.data,
+        });
       } else if (msg.type === "activeNotes") {
-        useAudioDisplayStore.getState().setActiveNotes(msg.notes);
+        this.setDisplayState({
+          ...this.displayState,
+          activeNotes: msg.notes,
+        });
       } else if (msg.type === "level") {
-        useAudioDisplayStore.getState().setLevelDb(msg.db);
+        this.setDisplayState({
+          ...this.displayState,
+          levelDb: msg.db,
+        });
       }
     };
 
@@ -71,20 +100,38 @@ export class SynthEngine {
   }
 
   /** Get the AudioWorkletNode for external connection (DAW mode). */
-  get outputNode(): AudioWorkletNode | null {
+  get outputNode(): IAudioWorkletNode<PluginContext> | null {
     return this.workletNode;
+  }
+
+  getAudioDisplayState(): PluginAudioDisplayState {
+    return this.displayState;
+  }
+
+  setDisplayUpdateHandler(
+    handler: ((state: PluginAudioDisplayState) => void) | null,
+  ): void {
+    this.onDisplayUpdate = handler;
+    if (handler) {
+      handler(this.displayState);
+    }
   }
 
   private send(msg: WorkletMessage): void {
     this.workletNode?.port.postMessage(msg);
   }
 
-  noteOn(midi: number, velocity = 1.0): void {
-    this.send({ type: "noteOn", midi, velocity });
+  private setDisplayState(state: PluginAudioDisplayState): void {
+    this.displayState = state;
+    this.onDisplayUpdate?.(state);
   }
 
-  noteOff(midi: number): void {
-    this.send({ type: "noteOff", midi });
+  noteOn(midi: number, velocity = 1.0, time?: number): void {
+    this.send({ type: "noteOn", midi, velocity, time });
+  }
+
+  noteOff(midi: number, time?: number): void {
+    this.send({ type: "noteOff", midi, time });
   }
 
   setEnvelope(
@@ -115,12 +162,14 @@ export class SynthEngine {
   dispose(): void {
     this.workletNode?.disconnect();
     // Only close the context if we created it (standalone mode)
-    if (this.ctx && this.ownsContext) {
-      void this.ctx.close();
+    if (this.ctx && this.ownsContext && "close" in this.ctx) {
+      void (this.ctx as IAudioContext).close();
     }
     this.workletNode = null;
     this.ctx = null;
     this.initialized = false;
     this.ownsContext = false;
+    this.onDisplayUpdate = null;
+    this.displayState = EMPTY_AUDIO_DISPLAY;
   }
 }

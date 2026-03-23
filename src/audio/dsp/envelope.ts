@@ -7,6 +7,7 @@ export class RealtimeEnvelope {
   sustain: number;
   level: number;
   state: EnvelopeState;
+  private _buf: Float32Array;
 
   constructor(
     attack: number,
@@ -21,6 +22,7 @@ export class RealtimeEnvelope {
     this.sustain = sustain;
     this.level = 0.0;
     this.state = "off";
+    this._buf = new Float32Array(128);
   }
 
   noteOn(): void {
@@ -38,7 +40,10 @@ export class RealtimeEnvelope {
   }
 
   process(n: number): Float32Array {
-    const out = new Float32Array(n);
+    if (this._buf.length < n) {
+      this._buf = new Float32Array(n);
+    }
+    const out = this._buf;
     let pos = 0;
 
     while (pos < n) {
