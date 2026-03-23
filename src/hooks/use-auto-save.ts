@@ -8,12 +8,21 @@ const DEBOUNCE_MS = 1000;
 
 export function useAutoSave() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedAtRef = useRef<number>(0);
 
   useEffect(() => {
     const unsub = useProjectStore.subscribe((state) => {
+      if (state.project.modifiedAt === lastSavedAtRef.current) {
+        return;
+      }
+
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => {
-        saveProject(state.project).catch(console.error);
+        saveProject(state.project)
+          .then(() => {
+            lastSavedAtRef.current = state.project.modifiedAt;
+          })
+          .catch(console.error);
       }, DEBOUNCE_MS);
     });
 

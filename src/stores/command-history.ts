@@ -10,9 +10,23 @@ interface CommandHistoryState {
   canRedo: boolean;
 
   execute(command: Command): void;
+  commit(command: Command): void;
   undo(): void;
   redo(): void;
   clear(): void;
+}
+
+function pushCommand(
+  undoStack: Command[],
+  command: Command,
+): Pick<CommandHistoryState, "undoStack" | "redoStack" | "canUndo" | "canRedo"> {
+  const nextUndoStack = [...undoStack, command].slice(-MAX_UNDO_STACK);
+  return {
+    undoStack: nextUndoStack,
+    redoStack: [],
+    canUndo: nextUndoStack.length > 0,
+    canRedo: false,
+  };
 }
 
 export const useCommandHistory = create<CommandHistoryState>()((set, get) => ({
@@ -23,15 +37,11 @@ export const useCommandHistory = create<CommandHistoryState>()((set, get) => ({
 
   execute(command) {
     command.execute();
-    set((s) => {
-      const undoStack = [...s.undoStack, command].slice(-MAX_UNDO_STACK);
-      return {
-        undoStack,
-        redoStack: [],
-        canUndo: true,
-        canRedo: false,
-      };
-    });
+    set((s) => pushCommand(s.undoStack, command));
+  },
+
+  commit(command) {
+    set((s) => pushCommand(s.undoStack, command));
   },
 
   undo() {

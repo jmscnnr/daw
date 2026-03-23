@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
 
 export type BottomPanelMode = "mixer" | "plugin" | "editor" | "none";
 
@@ -32,7 +33,7 @@ interface UIState {
   toggleSnap(): void;
 }
 
-export const useUIStore = create<UIState>()((set) => ({
+export const useUIStore = create<UIState>()(subscribeWithSelector((set) => ({
   arrangementHeightPercent: 60,
   bottomPanelMode: "plugin",
 
@@ -87,4 +88,4 @@ export const useUIStore = create<UIState>()((set) => ({
   toggleSnap() {
     set((s) => ({ snapEnabled: !s.snapEnabled }));
   },
-}));
+})));

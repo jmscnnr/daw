@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
 import type { TransportState, LoopRegion } from "@/types/transport";
 
 interface TransportStoreState {
@@ -20,7 +21,7 @@ interface TransportStoreState {
   updatePosition(ticks: number): void;
 }
 
-export const useTransportStore = create<TransportStoreState>()((set) => ({
+export const useTransportStore = create<TransportStoreState>()(subscribeWithSelector((set) => ({
   state: "stopped",
   positionTicks: 0,
   recording: false,
@@ -65,4 +66,4 @@ export const useTransportStore = create<TransportStoreState>()((set) => ({
   updatePosition(ticks) {
     set({ positionTicks: ticks });
   },
-}));
+})));

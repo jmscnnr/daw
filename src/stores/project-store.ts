@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
 import type { Project, Track, Clip, TrackType, PluginSlot, MidiNote } from "@/types/project";
 import { createId } from "@/lib/id";
 import {
@@ -8,12 +9,37 @@ import {
 } from "@/lib/constants";
 import { SYNTH_PLUGIN_ID } from "@/audio/plugins/builtin/synth-plugin";
 
+interface ClipLocation {
+  trackId: string;
+  trackIndex: number;
+  clipIndex: number;
+}
+
+interface PluginSlotLocation {
+  trackId: string;
+  trackIndex: number;
+  slotIndex: number;
+}
+
+interface ProjectIndex {
+  trackIndicesById: Record<string, number>;
+  clipLocationsById: Record<string, ClipLocation>;
+  pluginSlotLocationsById: Record<string, PluginSlotLocation>;
+}
+
 interface ProjectState {
   project: Project;
+  projectIndex: ProjectIndex;
 
   // Project lifecycle
   loadProject(project: Project): void;
+  replaceProject(project: Project): void;
   newProject(): void;
+
+  // Fast lookups
+  getTrackById(trackId: string): Track | null;
+  findClipById(clipId: string): { trackId: string; clip: Clip } | null;
+  getPluginSlotById(slotId: string): { trackId: string; slot: PluginSlot } | null;
 
   // Track CRUD
   addTrack(type: TrackType, name?: string): string;
@@ -85,6 +111,7 @@ function createDefaultProject(): Project {
         armed: false,
       },
     ],
+    audioBuffers: [],
     masterVolume: 0.8,
     masterPan: 0,
     createdAt: Date.now(),
@@ -92,32 +119,113 @@ function createDefaultProject(): Project {
   };
 }
 
-function updateTrack(
-  tracks: Track[],
-  trackId: string,
-  updater: (track: Track) => Track,
-): Track[] {
-  return tracks.map((t) => (t.id === trackId ? updater(t) : t));
+function buildProjectIndex(project: Project): ProjectIndex {
+  const trackIndicesById: Record<string, number> = {};
+  const clipLocationsById: Record<string, ClipLocation> = {};
+  const pluginSlotLocationsById: Record<string, PluginSlotLocation> = {};
+
+  project.tracks.forEach((track, trackIndex) => {
+    trackIndicesById[track.id] = trackIndex;
+
+    track.clips.forEach((clip, clipIndex) => {
+      clipLocationsById[clip.id] = {
+        trackId: track.id,
+        trackIndex,
+        clipIndex,
+      };
+    });
+
+    track.pluginChain.forEach((slot, slotIndex) => {
+      pluginSlotLocationsById[slot.id] = {
+        trackId: track.id,
+        trackIndex,
+        slotIndex,
+      };
+    });
+  });
+
+  return {
+    trackIndicesById,
+    clipLocationsById,
+    pluginSlotLocationsById,
+  };
 }
 
-export const useProjectStore = create<ProjectState>()((set, get) => ({
-  project: createDefaultProject(),
+function withIndex(project: Project): Pick<ProjectState, "project" | "projectIndex"> {
+  return {
+    project,
+    projectIndex: buildProjectIndex(project),
+  };
+}
+
+function cloneTrackAt(tracks: Track[], trackIndex: number, updater: (track: Track) => Track): Track[] {
+  return tracks.map((track, index) => (index === trackIndex ? updater(track) : track));
+}
+
+function applyProjectMutation(
+  project: Project,
+  mutate: (draftTracks: Track[]) => Track[],
+): Pick<ProjectState, "project" | "projectIndex"> {
+  const nextProject: Project = {
+    ...project,
+    tracks: mutate(project.tracks),
+    modifiedAt: Date.now(),
+  };
+  return withIndex(nextProject);
+}
+
+export const useProjectStore = create<ProjectState>()(subscribeWithSelector((set, get) => ({
+  ...withIndex(createDefaultProject()),
 
   loadProject(project) {
-    set({ project });
+    set(withIndex(project));
+  },
+
+  replaceProject(project) {
+    set(withIndex(project));
   },
 
   newProject() {
-    set({ project: createDefaultProject() });
+    set(withIndex(createDefaultProject()));
+  },
+
+  getTrackById(trackId) {
+    const { project, projectIndex } = get();
+    const trackIndex = projectIndex.trackIndicesById[trackId];
+    return trackIndex === undefined ? null : project.tracks[trackIndex] ?? null;
+  },
+
+  findClipById(clipId) {
+    const { project, projectIndex } = get();
+    const location = projectIndex.clipLocationsById[clipId];
+    if (!location) return null;
+
+    const track = project.tracks[location.trackIndex];
+    const clip = track?.clips[location.clipIndex];
+    if (!track || !clip) return null;
+
+    return { trackId: track.id, clip };
+  },
+
+  getPluginSlotById(slotId) {
+    const { project, projectIndex } = get();
+    const location = projectIndex.pluginSlotLocationsById[slotId];
+    if (!location) return null;
+
+    const track = project.tracks[location.trackIndex];
+    const slot = track?.pluginChain[location.slotIndex];
+    if (!track || !slot) return null;
+
+    return { trackId: track.id, slot };
   },
 
   addTrack(type, name) {
     const id = createId();
-    const { tracks } = get().project;
-    const colorIndex = tracks.length % TRACK_COLORS.length;
+    const { project } = get();
+    const colorIndex = project.tracks.length % TRACK_COLORS.length;
     const track: Track = {
       id,
-      name: name ?? `${type === "midi" ? "MIDI" : "Audio"} ${tracks.length + 1}`,
+      name: name ?? `${type === "midi" ? "MIDI" : "Audio"} ${project.tracks.length + 1}`,
       type,
       color: TRACK_COLORS[colorIndex]!,
       clips: [],
@@ -128,123 +236,128 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       solo: false,
       armed: false,
     };
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: [...s.project.tracks, track],
-        modifiedAt: Date.now(),
-      },
+
+    set(withIndex({
+      ...project,
+      tracks: [...project.tracks, track],
+      modifiedAt: Date.now(),
     }));
+
     return id;
   },
 
   removeTrack(trackId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.filter((t) => t.id !== trackId),
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      const tracks = state.project.tracks.filter((_, index) => index !== trackIndex);
+      return withIndex({
+        ...state.project,
+        tracks,
         modifiedAt: Date.now(),
-      },
-    }));
+      });
+    });
   },
 
   renameTrack(trackId, name) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          name,
-        })),
-        modifiedAt: Date.now(),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, name })),
+      );
+    });
   },
 
   setTrackColor(trackId, color) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          color,
-        })),
-        modifiedAt: Date.now(),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, color })),
+      );
+    });
   },
 
   reorderTrack(trackId, newIndex) {
-    set((s) => {
-      const tracks = [...s.project.tracks];
-      const oldIndex = tracks.findIndex((t) => t.id === trackId);
-      if (oldIndex === -1) return s;
-      const [track] = tracks.splice(oldIndex, 1);
-      tracks.splice(newIndex, 0, track!);
-      return {
-        project: { ...s.project, tracks, modifiedAt: Date.now() },
-      };
+    set((state) => {
+      const currentIndex = state.projectIndex.trackIndicesById[trackId];
+      if (currentIndex === undefined) return state;
+
+      const clampedIndex = Math.max(0, Math.min(state.project.tracks.length - 1, newIndex));
+      if (currentIndex === clampedIndex) return state;
+
+      const tracks = [...state.project.tracks];
+      const [track] = tracks.splice(currentIndex, 1);
+      if (!track) return state;
+      tracks.splice(clampedIndex, 0, track);
+
+      return withIndex({
+        ...state.project,
+        tracks,
+        modifiedAt: Date.now(),
+      });
     });
   },
 
   setTrackVolume(trackId, volume) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          volume,
-        })),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+      if (state.project.tracks[trackIndex]?.volume === volume) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, volume })),
+      );
+    });
   },
 
   setTrackPan(trackId, pan) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          pan,
-        })),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+      if (state.project.tracks[trackIndex]?.pan === pan) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, pan })),
+      );
+    });
   },
 
   toggleTrackMute(trackId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          mute: !t.mute,
-        })),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, mute: !track.mute })),
+      );
+    });
   },
 
   toggleTrackSolo(trackId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          solo: !t.solo,
-        })),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, solo: !track.solo })),
+      );
+    });
   },
 
   toggleTrackArm(trackId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          armed: !t.armed,
-        })),
-      },
-    }));
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({ ...track, armed: !track.armed })),
+      );
+    });
   },
 
   addPluginSlot(trackId, pluginId) {
@@ -255,204 +368,237 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       state: {},
       bypassed: false,
     };
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          pluginChain: [...t.pluginChain, slot],
+
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          pluginChain: [...track.pluginChain, slot],
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
+
     return slotId;
   },
 
   removePluginSlot(trackId, slotId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          pluginChain: t.pluginChain.filter((p) => p.id !== slotId),
+    set((state) => {
+      const location = state.projectIndex.pluginSlotLocationsById[slotId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          pluginChain: track.pluginChain.filter((slot) => slot.id !== slotId),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
-  updatePluginSlotState(trackId, slotId, state) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          pluginChain: t.pluginChain.map((p) =>
-            p.id === slotId ? { ...p, state } : p,
+  updatePluginSlotState(trackId, slotId, stateUpdate) {
+    set((state) => {
+      const location = state.projectIndex.pluginSlotLocationsById[slotId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          pluginChain: track.pluginChain.map((slot) =>
+            slot.id === slotId ? { ...slot, state: stateUpdate } : slot,
           ),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   addClip(trackId, clip) {
     const id = createId();
     const fullClip: Clip = { ...clip, id, trackId };
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: [...t.clips, fullClip],
+
+    set((state) => {
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (trackIndex === undefined) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: [...track.clips, fullClip],
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
+
     return id;
   },
 
   removeClip(trackId, clipId) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: t.clips.filter((c) => c.id !== clipId),
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.filter((clip) => clip.id !== clipId),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   moveClip(clipId, newStartTick, newTrackId) {
-    set((s) => {
-      let clip: Clip | undefined;
-      let sourceTrackId: string | undefined;
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      if (!location) return state;
 
-      for (const track of s.project.tracks) {
-        const found = track.clips.find((c) => c.id === clipId);
-        if (found) {
-          clip = found;
-          sourceTrackId = track.id;
-          break;
-        }
+      const sourceTrack = state.project.tracks[location.trackIndex];
+      const clip = sourceTrack?.clips[location.clipIndex];
+      if (!sourceTrack || !clip) return state;
+
+      const targetTrackId = newTrackId ?? sourceTrack.id;
+      const targetTrackIndex = state.projectIndex.trackIndicesById[targetTrackId];
+      if (targetTrackIndex === undefined) return state;
+
+      if (targetTrackId === sourceTrack.id) {
+        return applyProjectMutation(state.project, (tracks) =>
+          cloneTrackAt(tracks, location.trackIndex, (track) => ({
+            ...track,
+            clips: track.clips.map((candidate) =>
+              candidate.id === clipId
+                ? { ...candidate, startTick: newStartTick, trackId: targetTrackId }
+                : candidate,
+            ),
+          })),
+        );
       }
 
-      if (!clip || !sourceTrackId) return s;
-
-      const targetTrackId = newTrackId ?? sourceTrackId;
-      const movedClip = {
+      const movedClip: Clip = {
         ...clip,
         startTick: newStartTick,
         trackId: targetTrackId,
       };
 
-      let tracks = s.project.tracks;
-
-      // Remove from source
-      tracks = updateTrack(tracks, sourceTrackId, (t) => ({
-        ...t,
-        clips: t.clips.filter((c) => c.id !== clipId),
-      }));
-
-      // Add to target
-      tracks = updateTrack(tracks, targetTrackId, (t) => ({
-        ...t,
-        clips: [...t.clips, movedClip],
-      }));
-
-      return {
-        project: { ...s.project, tracks, modifiedAt: Date.now() },
-      };
+      return applyProjectMutation(state.project, (tracks) =>
+        tracks.map((track, index) => {
+          if (index === location.trackIndex) {
+            return {
+              ...track,
+              clips: track.clips.filter((candidate) => candidate.id !== clipId),
+            };
+          }
+          if (index === targetTrackIndex) {
+            return {
+              ...track,
+              clips: [...track.clips, movedClip],
+            };
+          }
+          return track;
+        }),
+      );
     });
   },
 
   addNoteToClip(trackId, clipId, note) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: t.clips.map((c) => {
-            if (c.id !== clipId || c.content.type !== "midi") return c;
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId || clip.content.type !== "midi") return clip;
             return {
-              ...c,
-              content: { ...c.content, notes: [...c.content.notes, note] },
+              ...clip,
+              content: { ...clip.content, notes: [...clip.content.notes, note] },
             };
           }),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   removeNoteFromClip(trackId, clipId, noteIndex) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: t.clips.map((c) => {
-            if (c.id !== clipId || c.content.type !== "midi") return c;
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId || clip.content.type !== "midi") return clip;
             return {
-              ...c,
+              ...clip,
               content: {
-                ...c.content,
-                notes: c.content.notes.filter((_, i) => i !== noteIndex),
+                ...clip.content,
+                notes: clip.content.notes.filter((_, index) => index !== noteIndex),
               },
             };
           }),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   updateNoteInClip(trackId, clipId, noteIndex, noteUpdate) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: t.clips.map((c) => {
-            if (c.id !== clipId || c.content.type !== "midi") return c;
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId || clip.content.type !== "midi") return clip;
             return {
-              ...c,
+              ...clip,
               content: {
-                ...c.content,
-                notes: c.content.notes.map((n, i) =>
-                  i === noteIndex ? { ...n, ...noteUpdate } : n,
+                ...clip.content,
+                notes: clip.content.notes.map((note, index) =>
+                  index === noteIndex ? { ...note, ...noteUpdate } : note,
                 ),
               },
             };
           }),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   resizeClip(trackId, clipId, durationTicks) {
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId ? { ...c, durationTicks } : c,
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.map((clip) =>
+            clip.id === clipId ? { ...clip, durationTicks } : clip,
           ),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      );
+    });
   },
 
   splitClip(trackId, clipId, splitTick) {
-    const { project } = get();
-    const track = project.tracks.find((t) => t.id === trackId);
-    const clip = track?.clips.find((c) => c.id === clipId);
-    if (!clip) return null;
+    const state = get();
+    const location = state.projectIndex.clipLocationsById[clipId];
+    const trackIndex = state.projectIndex.trackIndicesById[trackId];
+    if (!location || trackIndex === undefined || location.trackId !== trackId) return null;
+
+    const track = state.project.tracks[trackIndex];
+    const clip = track?.clips[location.clipIndex];
+    if (!track || !clip) return null;
 
     const relTick = splitTick - clip.startTick;
     if (relTick <= 0 || relTick >= clip.durationTicks) return null;
@@ -465,22 +611,27 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     if (clip.content.type === "midi") {
       const leftNotes: MidiNote[] = [];
       const rightNotes: MidiNote[] = [];
-      for (const n of clip.content.notes) {
-        if (n.startTick < relTick) {
+
+      for (const note of clip.content.notes) {
+        if (note.startTick < relTick) {
           leftNotes.push({
-            ...n,
-            durationTicks: Math.min(n.durationTicks, relTick - n.startTick),
+            ...note,
+            durationTicks: Math.min(note.durationTicks, relTick - note.startTick),
           });
         }
-        if (n.startTick + n.durationTicks > relTick) {
-          if (n.startTick >= relTick) {
-            rightNotes.push({ ...n, startTick: n.startTick - relTick });
+        if (note.startTick + note.durationTicks > relTick) {
+          if (note.startTick >= relTick) {
+            rightNotes.push({ ...note, startTick: note.startTick - relTick });
           } else {
-            const overlap = n.startTick + n.durationTicks - relTick;
-            rightNotes.push({ ...n, startTick: 0, durationTicks: overlap });
+            rightNotes.push({
+              ...note,
+              startTick: 0,
+              durationTicks: note.startTick + note.durationTicks - relTick,
+            });
           }
         }
       }
+
       leftContent = { type: "midi", notes: leftNotes };
       rightContent = { type: "midi", notes: rightNotes };
     }
@@ -501,41 +652,50 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       content: rightContent,
     };
 
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: updateTrack(s.project.tracks, trackId, (t) => ({
-          ...t,
-          clips: [...t.clips.filter((c) => c.id !== clipId), leftClip, rightClip],
+    set((currentState) =>
+      applyProjectMutation(currentState.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (candidateTrack) => ({
+          ...candidateTrack,
+          clips: candidateTrack.clips.flatMap((candidateClip) => {
+            if (candidateClip.id !== clipId) return [candidateClip];
+            return [leftClip, rightClip];
+          }),
         })),
-        modifiedAt: Date.now(),
-      },
-    }));
+      ),
+    );
 
     return rightId;
   },
 
   setProjectName(name) {
-    set((s) => ({
-      project: { ...s.project, name, modifiedAt: Date.now() },
+    set((state) => withIndex({
+      ...state.project,
+      name,
+      modifiedAt: Date.now(),
     }));
   },
 
   setBPM(bpm) {
-    set((s) => ({
-      project: { ...s.project, bpm, modifiedAt: Date.now() },
+    set((state) => withIndex({
+      ...state.project,
+      bpm,
+      modifiedAt: Date.now(),
     }));
   },
 
   setMasterVolume(volume) {
-    set((s) => ({
-      project: { ...s.project, masterVolume: volume },
+    set((state) => withIndex({
+      ...state.project,
+      masterVolume: volume,
+      modifiedAt: Date.now(),
     }));
   },
 
   setMasterPan(pan) {
-    set((s) => ({
-      project: { ...s.project, masterPan: pan },
+    set((state) => withIndex({
+      ...state.project,
+      masterPan: pan,
+      modifiedAt: Date.now(),
     }));
   },
-}));
+})));

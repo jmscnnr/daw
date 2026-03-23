@@ -19,9 +19,9 @@ interface RecordingState {
   startRecording(trackId: string, clipId: string, startTick: number): void;
   noteOn(note: number, velocity: number, absoluteTick: number): void;
   /** Returns the completed note info so caller can add it to the clip */
-  noteOff(note: number, absoluteTick: number): ActiveRecordNote | null;
+  noteOff(note: number): ActiveRecordNote | null;
   /** Close all held notes, returns them */
-  finalizeHeld(currentTick: number): ActiveRecordNote[];
+  finalizeHeld(): ActiveRecordNote[];
   reset(): void;
 }
 
@@ -46,7 +46,7 @@ export const useRecordingStore = create<RecordingState>()((set, get) => ({
     set({ activeNotes: newActive });
   },
 
-  noteOff(note, absoluteTick) {
+  noteOff(note) {
     const { activeNotes } = get();
     const active = activeNotes.get(note);
     if (!active) return null;
@@ -56,7 +56,7 @@ export const useRecordingStore = create<RecordingState>()((set, get) => ({
     return active;
   },
 
-  finalizeHeld(currentTick) {
+  finalizeHeld() {
     const { activeNotes } = get();
     const held = Array.from(activeNotes.values());
     set({ activeNotes: new Map() });

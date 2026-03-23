@@ -3,20 +3,28 @@ import type { Project } from "@/types/project";
 const DB_NAME = "daw-projects";
 const DB_VERSION = 1;
 const STORE_NAME = "projects";
+let openPromise: Promise<IDBDatabase> | null = null;
 
 function open(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
-        store.createIndex("modifiedAt", "modifiedAt");
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  if (!openPromise) {
+    openPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
+          store.createIndex("modifiedAt", "modifiedAt");
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => {
+        openPromise = null;
+        reject(req.error);
+      };
+    });
+  }
+
+  return openPromise;
 }
 
 function tx(
