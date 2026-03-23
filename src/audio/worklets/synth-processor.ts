@@ -45,42 +45,78 @@ function midiToFreq(midi: number): number {
 }
 
 // --- Voice ---
+const MAX_OSCS = 8;
+
 class Voice {
-  midi: number;
+  midi = 0;
+  velocity = 1.0;
   env: RealtimeEnvelope;
+  filter: BiquadFilter;
   private oscs: { shape: Shape; phase: number; phaseInc: number }[];
   private levels: number[];
+  private oscCount = 0;
   // Preallocated scratch buffers — reused every render call
   private _phases: Float32Array;
   private _oscOut: Float32Array;
+  private _active = false;
 
-  constructor(
+  constructor(sr: number) {
+    this.env = new RealtimeEnvelope(0.01, 0.1, 0.7, 0.3, sr);
+    this.filter = new BiquadFilter();
+    this.oscs = Array.from({ length: MAX_OSCS }, () => ({
+      shape: "saw" as Shape,
+      phase: 0,
+      phaseInc: 0,
+    }));
+    this.levels = new Array(MAX_OSCS).fill(0);
+    this._phases = new Float32Array(BLOCK_SIZE);
+    this._oscOut = new Float32Array(BLOCK_SIZE);
+  }
+
+  /** Reinitialize for a new note — no allocations. */
+  trigger(
     midi: number,
-    oscConfigs: OscConfig[],
+    velocity: number,
+    configs: OscConfig[],
     attack: number,
     decay: number,
     sustain: number,
     release: number,
     sr: number,
-  ) {
+  ): void {
     this.midi = midi;
-    this.env = new RealtimeEnvelope(attack, decay, sustain, release, sr);
+    this.velocity = velocity;
+    this._active = true;
+    this.env.reset(attack, decay, sustain, release, sr);
     this.env.noteOn();
+    this.filter.setOff();
 
-    this.oscs = [];
-    this.levels = [];
-    for (const cfg of oscConfigs) {
+    this.oscCount = Math.min(configs.length, MAX_OSCS);
+    for (let i = 0; i < this.oscCount; i++) {
+      const cfg = configs[i]!;
       const freq = midiToFreq(midi + cfg.octave * 12 + cfg.fine / 100.0);
-      this.oscs.push({ shape: cfg.shape, phase: 0.0, phaseInc: freq / sr });
-      this.levels.push(cfg.level);
+      this.oscs[i]!.shape = cfg.shape;
+      this.oscs[i]!.phase = 0;
+      this.oscs[i]!.phaseInc = freq / sr;
+      this.levels[i] = cfg.level;
     }
-
-    this._phases = new Float32Array(BLOCK_SIZE);
-    this._oscOut = new Float32Array(BLOCK_SIZE);
   }
 
   get active(): boolean {
-    return this.env.active;
+    return this._active && this.env.active;
+  }
+
+  /** Update osc configs on a playing voice (preserves phase to avoid clicks). */
+  updateOscConfigs(configs: OscConfig[], sr: number): void {
+    this.oscCount = Math.min(configs.length, MAX_OSCS);
+    for (let i = 0; i < this.oscCount; i++) {
+      const cfg = configs[i]!;
+      const freq = midiToFreq(this.midi + cfg.octave * 12 + cfg.fine / 100.0);
+      this.oscs[i]!.shape = cfg.shape;
+      // preserve phase — don't reset to 0
+      this.oscs[i]!.phaseInc = freq / sr;
+      this.levels[i] = cfg.level;
+    }
   }
 
   /** Render this voice and add into the target buffer (+=). */
@@ -88,8 +124,9 @@ class Voice {
     const envBuf = this.env.process(n);
     const phases = this._phases;
     const oscOut = this._oscOut;
+    const vel = this.velocity;
 
-    for (let oi = 0; oi < this.oscs.length; oi++) {
+    for (let oi = 0; oi < this.oscCount; oi++) {
       const osc = this.oscs[oi]!;
       const level = this.levels[oi]!;
 
@@ -99,20 +136,47 @@ class Voice {
       }
       osc.phase = (osc.phase + n * osc.phaseInc) % 1.0;
 
-      // Render waveform
-      renderShape(oscOut, phases, osc.shape);
+      // Render waveform with PolyBLEP anti-aliasing
+      renderShape(oscOut, phases, osc.shape, osc.phaseInc);
 
-      // Accumulate into target with envelope
+      // Accumulate into target with envelope and velocity
       for (let i = 0; i < n; i++) {
-        target[i]! += oscOut[i]! * level * envBuf[i]!;
+        target[i]! += oscOut[i]! * level * envBuf[i]! * vel;
       }
     }
+
+    if (!this.env.active) {
+      this._active = false;
+    }
+  }
+}
+
+// --- SmoothedValue (one-pole exponential smoothing) ---
+class SmoothedValue {
+  current: number;
+  target: number;
+  private coeff: number;
+
+  constructor(initial: number, smoothTimeMs: number, sr: number) {
+    this.current = initial;
+    this.target = initial;
+    this.coeff = 1.0 - Math.exp(-1000.0 / (smoothTimeMs * sr));
+  }
+
+  set(value: number): void {
+    this.target = value;
+  }
+
+  next(): number {
+    this.current += this.coeff * (this.target - this.current);
+    return this.current;
   }
 }
 
 // --- PolySynth ---
 class PolySynth {
-  private voices: Map<number, Voice> = new Map();
+  private pool: Voice[];
+  private activeVoices: Map<number, Voice> = new Map();
   private sr: number;
   attack = 0.01;
   decay = 0.1;
@@ -126,28 +190,63 @@ class PolySynth {
   constructor(sampleRate: number) {
     this.sr = sampleRate;
     this._renderBuf = new Float32Array(BLOCK_SIZE);
+    // Pre-allocate all voices upfront — no allocations on noteOn
+    this.pool = Array.from({ length: MAX_VOICES }, () => new Voice(sampleRate));
   }
 
-  noteOn(midi: number): void {
-    if (this.voices.size >= MAX_VOICES && !this.voices.has(midi)) {
-      // Voice stealing: prefer releasing voices, then oldest
-      let stolen: number | null = null;
-      for (const [m, v] of this.voices) {
-        if (v.env.state === "release") {
-          stolen = m;
-          break;
+  private findFreeVoice(): Voice | null {
+    for (const v of this.pool) {
+      if (!v.active && !this.activeVoices.has(v.midi)) {
+        // Double check it's not in the active map under a different key
+        let inUse = false;
+        for (const av of this.activeVoices.values()) {
+          if (av === v) { inUse = true; break; }
         }
-      }
-      if (stolen === null) {
-        stolen = this.voices.keys().next().value ?? null;
-      }
-      if (stolen !== null) {
-        this.voices.delete(stolen);
+        if (!inUse) return v;
       }
     }
+    return null;
+  }
 
-    const voice = new Voice(
+  private stealVoice(): Voice {
+    // Prefer releasing voices, then oldest
+    let stolen: Voice | null = null;
+    let stolenMidi: number | null = null;
+    for (const [m, v] of this.activeVoices) {
+      if (v.env.state === "release") {
+        stolen = v;
+        stolenMidi = m;
+        break;
+      }
+    }
+    if (!stolen) {
+      const first = this.activeVoices.entries().next().value;
+      if (first) {
+        stolenMidi = first[0];
+        stolen = first[1];
+      }
+    }
+    if (stolenMidi !== null) {
+      this.activeVoices.delete(stolenMidi!);
+    }
+    return stolen!;
+  }
+
+  noteOn(midi: number, velocity: number): void {
+    // If same note is already playing, release it first
+    const existing = this.activeVoices.get(midi);
+    if (existing) {
+      this.activeVoices.delete(midi);
+    }
+
+    let voice = this.findFreeVoice();
+    if (!voice) {
+      voice = this.stealVoice();
+    }
+
+    voice.trigger(
       midi,
+      velocity,
       this.oscConfigs,
       this.attack,
       this.decay,
@@ -155,23 +254,37 @@ class PolySynth {
       this.release,
       this.sr,
     );
-    this.voices.set(midi, voice);
+    this.activeVoices.set(midi, voice);
   }
 
   noteOff(midi: number): void {
-    const voice = this.voices.get(midi);
+    const voice = this.activeVoices.get(midi);
     if (voice) {
       if (this.release <= 0.001) {
-        this.voices.delete(midi);
+        this.activeVoices.delete(midi);
       } else {
         voice.env.noteOff();
       }
     }
   }
 
+  /** Propagate osc config changes to all active voices. */
+  updateActiveOscConfigs(configs: OscConfig[]): void {
+    for (const voice of this.activeVoices.values()) {
+      voice.updateOscConfigs(configs, this.sr);
+    }
+  }
+
+  /** Update release time on all active voices. */
+  updateActiveRelease(release: number): void {
+    for (const voice of this.activeVoices.values()) {
+      voice.env.updateRelease(release, this.sr);
+    }
+  }
+
   activeNotes(): number[] {
     const notes: number[] = [];
-    for (const [m, v] of this.voices) {
+    for (const [m, v] of this.activeVoices) {
       if (v.active) notes.push(m);
     }
     return notes;
@@ -179,13 +292,12 @@ class PolySynth {
 
   render(nFrames: number): Float32Array {
     const buf = this._renderBuf;
-    // Zero the buffer
     buf.fill(0, 0, nFrames);
 
     const dead = this._deadList;
     dead.length = 0;
 
-    for (const [midi, voice] of this.voices) {
+    for (const [midi, voice] of this.activeVoices) {
       if (voice.active) {
         voice.renderInto(buf, nFrames);
       } else {
@@ -194,18 +306,20 @@ class PolySynth {
     }
 
     for (const midi of dead) {
-      this.voices.delete(midi);
+      this.activeVoices.delete(midi);
     }
 
     return buf;
   }
 }
 
+const WAVEFORM_DISPLAY_SIZE = 256;
+
 // --- AudioWorklet Processor ---
 class SynthProcessor extends AudioWorkletProcessor {
   private synth: PolySynth;
   private filter: BiquadFilter;
-  private masterVolume: number;
+  private smoothVolume: SmoothedValue;
   private ring: Float32Array;
   private ringPos: number;
   private blockCount: number;
@@ -217,7 +331,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     super();
     this.synth = new PolySynth(sampleRate);
     this.filter = new BiquadFilter();
-    this.masterVolume = 0.3;
+    this.smoothVolume = new SmoothedValue(0.3, 5, sampleRate);
     this.ring = new Float32Array(RING_SIZE);
     this.ringPos = 0;
     this.blockCount = 0;
@@ -239,7 +353,7 @@ class SynthProcessor extends AudioWorkletProcessor {
             velocity: msg.velocity,
           });
         } else {
-          this.synth.noteOn(msg.midi);
+          this.synth.noteOn(msg.midi, msg.velocity);
         }
         break;
       case "noteOff":
@@ -259,6 +373,8 @@ class SynthProcessor extends AudioWorkletProcessor {
         this.synth.decay = msg.decay;
         this.synth.sustain = msg.sustain;
         this.synth.release = msg.release;
+        // Update release on all currently sounding voices
+        this.synth.updateActiveRelease(msg.release);
         break;
       case "setFilter": {
         const { mode, cutoff, q } = msg;
@@ -275,9 +391,11 @@ class SynthProcessor extends AudioWorkletProcessor {
       }
       case "setOscConfigs":
         this.synth.oscConfigs = msg.configs;
+        // Propagate to all active voices
+        this.synth.updateActiveOscConfigs(msg.configs);
         break;
       case "setVolume":
-        this.masterVolume = msg.value;
+        this.smoothVolume.set(msg.value);
         break;
     }
   }
@@ -299,7 +417,7 @@ class SynthProcessor extends AudioWorkletProcessor {
       const event = this.pendingEvents[i]!;
       if (event.time <= blockEndTime) {
         if (event.type === "noteOn") {
-          this.synth.noteOn(event.midi);
+          this.synth.noteOn(event.midi, event.velocity);
         } else {
           this.synth.noteOff(event.midi);
         }
@@ -319,10 +437,11 @@ class SynthProcessor extends AudioWorkletProcessor {
     parameters: Record<string, Float32Array>,
   ): boolean {
     void parameters;
-    const output = outputs[0]?.[0];
-    if (!output) return true;
+    const outL = outputs[0]?.[0];
+    if (!outL) return true;
+    const outR = outputs[0]?.[1];
 
-    const nFrames = output.length;
+    const nFrames = outL.length;
 
     // Process any pending timed events that fall within this block
     this.drainPendingEvents();
@@ -330,28 +449,32 @@ class SynthProcessor extends AudioWorkletProcessor {
     // Render synth (returns preallocated buffer — use before next render call)
     let buf = this.synth.render(nFrames);
 
-    // Apply filter (processes in-place)
+    // Apply global filter (processes in-place)
     buf = this.filter.process(buf);
 
-    // Apply master volume and clip, track peak
+    // Apply smoothed master volume and tanh soft saturation, track peak
     let peak = 0;
     for (let i = 0; i < nFrames; i++) {
-      const sample = buf[i]! * this.masterVolume;
-      output[i] = Math.max(-1.0, Math.min(1.0, sample));
-      const abs = Math.abs(output[i]!);
+      const vol = this.smoothVolume.next();
+      const sample = buf[i]! * vol;
+      outL[i] = Math.tanh(sample);
+      const abs = Math.abs(outL[i]!);
       if (abs > peak) peak = abs;
     }
     if (peak > this.peakSinceSend) this.peakSinceSend = peak;
+
+    // Copy to right channel (dual mono)
+    if (outR) outR.set(outL);
 
     // Write to ring buffer
     const n = nFrames;
     let pos = this.ringPos;
     const space = RING_SIZE - pos;
     if (n <= space) {
-      this.ring.set(output.subarray(0, n), pos);
+      this.ring.set(outL.subarray(0, n), pos);
     } else {
-      this.ring.set(output.subarray(0, space), pos);
-      this.ring.set(output.subarray(space, n), 0);
+      this.ring.set(outL.subarray(0, space), pos);
+      this.ring.set(outL.subarray(space, n), 0);
     }
     this.ringPos = (pos + n) % RING_SIZE;
 
@@ -360,11 +483,14 @@ class SynthProcessor extends AudioWorkletProcessor {
     if (this.blockCount >= WAVEFORM_SEND_INTERVAL) {
       this.blockCount = 0;
 
-      // Copy the ring in chronological order
+      // Downsample the ring for display — 256 samples is plenty for visualization
       pos = this.ringPos;
-      const waveform = new Float32Array(RING_SIZE);
-      waveform.set(this.ring.subarray(pos), 0);
-      waveform.set(this.ring.subarray(0, pos), RING_SIZE - pos);
+      const waveform = new Float32Array(WAVEFORM_DISPLAY_SIZE);
+      const step = RING_SIZE / WAVEFORM_DISPLAY_SIZE;
+      for (let i = 0; i < WAVEFORM_DISPLAY_SIZE; i++) {
+        const srcIdx = (pos + Math.floor(i * step)) % RING_SIZE;
+        waveform[i] = this.ring[srcIdx]!;
+      }
 
       // Send level
       const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;

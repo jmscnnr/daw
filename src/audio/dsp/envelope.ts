@@ -7,6 +7,8 @@ export class RealtimeEnvelope {
   sustain: number;
   level: number;
   state: EnvelopeState;
+  private releaseTime: number;
+  private sr: number;
   private _buf: Float32Array;
 
   constructor(
@@ -16,13 +18,33 @@ export class RealtimeEnvelope {
     release: number,
     sr: number,
   ) {
+    this.sr = sr;
     this.attackRate = 1.0 / Math.max(1, Math.round(sr * attack));
     this.decayRate = (1.0 - sustain) / Math.max(1, Math.round(sr * decay));
     this.releaseRate = sustain / Math.max(1, Math.round(sr * release));
+    this.releaseTime = release;
     this.sustain = sustain;
     this.level = 0.0;
     this.state = "off";
     this._buf = new Float32Array(128);
+  }
+
+  /** Reinitialize without allocating a new buffer. */
+  reset(
+    attack: number,
+    decay: number,
+    sustain: number,
+    release: number,
+    sr: number,
+  ): void {
+    this.sr = sr;
+    this.attackRate = 1.0 / Math.max(1, Math.round(sr * attack));
+    this.decayRate = (1.0 - sustain) / Math.max(1, Math.round(sr * decay));
+    this.releaseRate = sustain / Math.max(1, Math.round(sr * release));
+    this.releaseTime = release;
+    this.sustain = sustain;
+    this.level = 0.0;
+    this.state = "off";
   }
 
   noteOn(): void {
@@ -32,7 +54,15 @@ export class RealtimeEnvelope {
   noteOff(): void {
     if (this.state !== "off") {
       this.state = "release";
+      // Recompute release rate from current level (fixes sustain=0 voice leak
+      // and handles noteOff during attack where level != sustain)
+      this.releaseRate = this.level / Math.max(1, Math.round(this.sr * this.releaseTime));
     }
+  }
+
+  updateRelease(release: number, sr: number): void {
+    this.releaseTime = release;
+    this.sr = sr;
   }
 
   get active(): boolean {

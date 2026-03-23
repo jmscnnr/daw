@@ -1,7 +1,18 @@
 "use strict";
 (() => {
   // src/audio/dsp/waveshapes.ts
-  function renderShape(out, phases, shape) {
+  function polyBlep(t, dt) {
+    if (t < dt) {
+      const u = t / dt;
+      return u + u - u * u - 1;
+    }
+    if (t > 1 - dt) {
+      const u = (t - 1) / dt;
+      return u * u + u + u + 1;
+    }
+    return 0;
+  }
+  function renderShape(out, phases, shape, dt = 0) {
     const len = phases.length;
     const TWO_PI = 2 * Math.PI;
     switch (shape) {
@@ -11,13 +22,30 @@
         }
         break;
       case "saw":
-        for (let i = 0; i < len; i++) {
-          out[i] = 2 * phases[i] - 1;
+        if (dt > 0) {
+          for (let i = 0; i < len; i++) {
+            const t = phases[i];
+            out[i] = 2 * t - 1 - polyBlep(t, dt);
+          }
+        } else {
+          for (let i = 0; i < len; i++) {
+            out[i] = 2 * phases[i] - 1;
+          }
         }
         break;
       case "square":
-        for (let i = 0; i < len; i++) {
-          out[i] = phases[i] < 0.5 ? 1 : -1;
+        if (dt > 0) {
+          for (let i = 0; i < len; i++) {
+            const t = phases[i];
+            let val = t < 0.5 ? 1 : -1;
+            val += polyBlep(t, dt);
+            val -= polyBlep((t + 0.5) % 1, dt);
+            out[i] = val;
+          }
+        } else {
+          for (let i = 0; i < len; i++) {
+            out[i] = phases[i] < 0.5 ? 1 : -1;
+          }
         }
         break;
       case "triangle":
@@ -35,13 +63,26 @@
   // src/audio/dsp/envelope.ts
   var RealtimeEnvelope = class {
     constructor(attack, decay, sustain, release, sr) {
+      this.sr = sr;
       this.attackRate = 1 / Math.max(1, Math.round(sr * attack));
       this.decayRate = (1 - sustain) / Math.max(1, Math.round(sr * decay));
       this.releaseRate = sustain / Math.max(1, Math.round(sr * release));
+      this.releaseTime = release;
       this.sustain = sustain;
       this.level = 0;
       this.state = "off";
       this._buf = new Float32Array(128);
+    }
+    /** Reinitialize without allocating a new buffer. */
+    reset(attack, decay, sustain, release, sr) {
+      this.sr = sr;
+      this.attackRate = 1 / Math.max(1, Math.round(sr * attack));
+      this.decayRate = (1 - sustain) / Math.max(1, Math.round(sr * decay));
+      this.releaseRate = sustain / Math.max(1, Math.round(sr * release));
+      this.releaseTime = release;
+      this.sustain = sustain;
+      this.level = 0;
+      this.state = "off";
     }
     noteOn() {
       this.state = "attack";
@@ -49,7 +90,12 @@
     noteOff() {
       if (this.state !== "off") {
         this.state = "release";
+        this.releaseRate = this.level / Math.max(1, Math.round(this.sr * this.releaseTime));
       }
+    }
+    updateRelease(release, sr) {
+      this.releaseTime = release;
+      this.sr = sr;
     }
     get active() {
       return this.state !== "off";
@@ -214,46 +260,96 @@
   function midiToFreq(midi) {
     return 440 * 2 ** ((midi - 69) / 12);
   }
+  var MAX_OSCS = 8;
   var Voice = class {
-    constructor(midi, oscConfigs, attack, decay, sustain, release, sr) {
-      this.midi = midi;
-      this.env = new RealtimeEnvelope(attack, decay, sustain, release, sr);
-      this.env.noteOn();
-      this.oscs = [];
-      this.levels = [];
-      for (const cfg of oscConfigs) {
-        const freq = midiToFreq(midi + cfg.octave * 12 + cfg.fine / 100);
-        this.oscs.push({ shape: cfg.shape, phase: 0, phaseInc: freq / sr });
-        this.levels.push(cfg.level);
-      }
+    constructor(sr) {
+      this.midi = 0;
+      this.velocity = 1;
+      this.oscCount = 0;
+      this._active = false;
+      this.env = new RealtimeEnvelope(0.01, 0.1, 0.7, 0.3, sr);
+      this.filter = new BiquadFilter();
+      this.oscs = Array.from({ length: MAX_OSCS }, () => ({
+        shape: "saw",
+        phase: 0,
+        phaseInc: 0
+      }));
+      this.levels = new Array(MAX_OSCS).fill(0);
       this._phases = new Float32Array(BLOCK_SIZE);
       this._oscOut = new Float32Array(BLOCK_SIZE);
     }
+    /** Reinitialize for a new note — no allocations. */
+    trigger(midi, velocity, configs, attack, decay, sustain, release, sr) {
+      this.midi = midi;
+      this.velocity = velocity;
+      this._active = true;
+      this.env.reset(attack, decay, sustain, release, sr);
+      this.env.noteOn();
+      this.filter.setOff();
+      this.oscCount = Math.min(configs.length, MAX_OSCS);
+      for (let i = 0; i < this.oscCount; i++) {
+        const cfg = configs[i];
+        const freq = midiToFreq(midi + cfg.octave * 12 + cfg.fine / 100);
+        this.oscs[i].shape = cfg.shape;
+        this.oscs[i].phase = 0;
+        this.oscs[i].phaseInc = freq / sr;
+        this.levels[i] = cfg.level;
+      }
+    }
     get active() {
-      return this.env.active;
+      return this._active && this.env.active;
+    }
+    /** Update osc configs on a playing voice (preserves phase to avoid clicks). */
+    updateOscConfigs(configs, sr) {
+      this.oscCount = Math.min(configs.length, MAX_OSCS);
+      for (let i = 0; i < this.oscCount; i++) {
+        const cfg = configs[i];
+        const freq = midiToFreq(this.midi + cfg.octave * 12 + cfg.fine / 100);
+        this.oscs[i].shape = cfg.shape;
+        this.oscs[i].phaseInc = freq / sr;
+        this.levels[i] = cfg.level;
+      }
     }
     /** Render this voice and add into the target buffer (+=). */
     renderInto(target, n) {
       const envBuf = this.env.process(n);
       const phases = this._phases;
       const oscOut = this._oscOut;
-      for (let oi = 0; oi < this.oscs.length; oi++) {
+      const vel = this.velocity;
+      for (let oi = 0; oi < this.oscCount; oi++) {
         const osc = this.oscs[oi];
         const level = this.levels[oi];
         for (let i = 0; i < n; i++) {
           phases[i] = (osc.phase + i * osc.phaseInc) % 1;
         }
         osc.phase = (osc.phase + n * osc.phaseInc) % 1;
-        renderShape(oscOut, phases, osc.shape);
+        renderShape(oscOut, phases, osc.shape, osc.phaseInc);
         for (let i = 0; i < n; i++) {
-          target[i] += oscOut[i] * level * envBuf[i];
+          target[i] += oscOut[i] * level * envBuf[i] * vel;
         }
       }
+      if (!this.env.active) {
+        this._active = false;
+      }
+    }
+  };
+  var SmoothedValue = class {
+    constructor(initial, smoothTimeMs, sr) {
+      this.current = initial;
+      this.target = initial;
+      this.coeff = 1 - Math.exp(-1e3 / (smoothTimeMs * sr));
+    }
+    set(value) {
+      this.target = value;
+    }
+    next() {
+      this.current += this.coeff * (this.target - this.current);
+      return this.current;
     }
   };
   var PolySynth = class {
     constructor(sampleRate2) {
-      this.voices = /* @__PURE__ */ new Map();
+      this.activeVoices = /* @__PURE__ */ new Map();
       this.attack = 0.01;
       this.decay = 0.1;
       this.sustain = 0.7;
@@ -262,25 +358,57 @@
       this._deadList = [];
       this.sr = sampleRate2;
       this._renderBuf = new Float32Array(BLOCK_SIZE);
+      this.pool = Array.from({ length: MAX_VOICES }, () => new Voice(sampleRate2));
     }
-    noteOn(midi) {
-      if (this.voices.size >= MAX_VOICES && !this.voices.has(midi)) {
-        let stolen = null;
-        for (const [m, v] of this.voices) {
-          if (v.env.state === "release") {
-            stolen = m;
-            break;
+    findFreeVoice() {
+      for (const v of this.pool) {
+        if (!v.active && !this.activeVoices.has(v.midi)) {
+          let inUse = false;
+          for (const av of this.activeVoices.values()) {
+            if (av === v) {
+              inUse = true;
+              break;
+            }
           }
-        }
-        if (stolen === null) {
-          stolen = this.voices.keys().next().value ?? null;
-        }
-        if (stolen !== null) {
-          this.voices.delete(stolen);
+          if (!inUse) return v;
         }
       }
-      const voice = new Voice(
+      return null;
+    }
+    stealVoice() {
+      let stolen = null;
+      let stolenMidi = null;
+      for (const [m, v] of this.activeVoices) {
+        if (v.env.state === "release") {
+          stolen = v;
+          stolenMidi = m;
+          break;
+        }
+      }
+      if (!stolen) {
+        const first = this.activeVoices.entries().next().value;
+        if (first) {
+          stolenMidi = first[0];
+          stolen = first[1];
+        }
+      }
+      if (stolenMidi !== null) {
+        this.activeVoices.delete(stolenMidi);
+      }
+      return stolen;
+    }
+    noteOn(midi, velocity) {
+      const existing = this.activeVoices.get(midi);
+      if (existing) {
+        this.activeVoices.delete(midi);
+      }
+      let voice = this.findFreeVoice();
+      if (!voice) {
+        voice = this.stealVoice();
+      }
+      voice.trigger(
         midi,
+        velocity,
         this.oscConfigs,
         this.attack,
         this.decay,
@@ -288,21 +416,33 @@
         this.release,
         this.sr
       );
-      this.voices.set(midi, voice);
+      this.activeVoices.set(midi, voice);
     }
     noteOff(midi) {
-      const voice = this.voices.get(midi);
+      const voice = this.activeVoices.get(midi);
       if (voice) {
         if (this.release <= 1e-3) {
-          this.voices.delete(midi);
+          this.activeVoices.delete(midi);
         } else {
           voice.env.noteOff();
         }
       }
     }
+    /** Propagate osc config changes to all active voices. */
+    updateActiveOscConfigs(configs) {
+      for (const voice of this.activeVoices.values()) {
+        voice.updateOscConfigs(configs, this.sr);
+      }
+    }
+    /** Update release time on all active voices. */
+    updateActiveRelease(release) {
+      for (const voice of this.activeVoices.values()) {
+        voice.env.updateRelease(release, this.sr);
+      }
+    }
     activeNotes() {
       const notes = [];
-      for (const [m, v] of this.voices) {
+      for (const [m, v] of this.activeVoices) {
         if (v.active) notes.push(m);
       }
       return notes;
@@ -312,7 +452,7 @@
       buf.fill(0, 0, nFrames);
       const dead = this._deadList;
       dead.length = 0;
-      for (const [midi, voice] of this.voices) {
+      for (const [midi, voice] of this.activeVoices) {
         if (voice.active) {
           voice.renderInto(buf, nFrames);
         } else {
@@ -320,11 +460,12 @@
         }
       }
       for (const midi of dead) {
-        this.voices.delete(midi);
+        this.activeVoices.delete(midi);
       }
       return buf;
     }
   };
+  var WAVEFORM_DISPLAY_SIZE = 256;
   var SynthProcessor = class extends AudioWorkletProcessor {
     constructor() {
       super();
@@ -332,7 +473,7 @@
       this.pendingEvents = [];
       this.synth = new PolySynth(sampleRate);
       this.filter = new BiquadFilter();
-      this.masterVolume = 0.3;
+      this.smoothVolume = new SmoothedValue(0.3, 5, sampleRate);
       this.ring = new Float32Array(RING_SIZE);
       this.ringPos = 0;
       this.blockCount = 0;
@@ -352,7 +493,7 @@
               velocity: msg.velocity
             });
           } else {
-            this.synth.noteOn(msg.midi);
+            this.synth.noteOn(msg.midi, msg.velocity);
           }
           break;
         case "noteOff":
@@ -372,6 +513,7 @@
           this.synth.decay = msg.decay;
           this.synth.sustain = msg.sustain;
           this.synth.release = msg.release;
+          this.synth.updateActiveRelease(msg.release);
           break;
         case "setFilter": {
           const { mode, cutoff, q } = msg;
@@ -388,9 +530,10 @@
         }
         case "setOscConfigs":
           this.synth.oscConfigs = msg.configs;
+          this.synth.updateActiveOscConfigs(msg.configs);
           break;
         case "setVolume":
-          this.masterVolume = msg.value;
+          this.smoothVolume.set(msg.value);
           break;
       }
     }
@@ -410,7 +553,7 @@
         const event = this.pendingEvents[i];
         if (event.time <= blockEndTime) {
           if (event.type === "noteOn") {
-            this.synth.noteOn(event.midi);
+            this.synth.noteOn(event.midi, event.velocity);
           } else {
             this.synth.noteOff(event.midi);
           }
@@ -425,37 +568,43 @@
     }
     process(_inputs, outputs, parameters) {
       void parameters;
-      const output = outputs[0]?.[0];
-      if (!output) return true;
-      const nFrames = output.length;
+      const outL = outputs[0]?.[0];
+      if (!outL) return true;
+      const outR = outputs[0]?.[1];
+      const nFrames = outL.length;
       this.drainPendingEvents();
       let buf = this.synth.render(nFrames);
       buf = this.filter.process(buf);
       let peak = 0;
       for (let i = 0; i < nFrames; i++) {
-        const sample = buf[i] * this.masterVolume;
-        output[i] = Math.max(-1, Math.min(1, sample));
-        const abs = Math.abs(output[i]);
+        const vol = this.smoothVolume.next();
+        const sample = buf[i] * vol;
+        outL[i] = Math.tanh(sample);
+        const abs = Math.abs(outL[i]);
         if (abs > peak) peak = abs;
       }
       if (peak > this.peakSinceSend) this.peakSinceSend = peak;
+      if (outR) outR.set(outL);
       const n = nFrames;
       let pos = this.ringPos;
       const space = RING_SIZE - pos;
       if (n <= space) {
-        this.ring.set(output.subarray(0, n), pos);
+        this.ring.set(outL.subarray(0, n), pos);
       } else {
-        this.ring.set(output.subarray(0, space), pos);
-        this.ring.set(output.subarray(space, n), 0);
+        this.ring.set(outL.subarray(0, space), pos);
+        this.ring.set(outL.subarray(space, n), 0);
       }
       this.ringPos = (pos + n) % RING_SIZE;
       this.blockCount++;
       if (this.blockCount >= WAVEFORM_SEND_INTERVAL) {
         this.blockCount = 0;
         pos = this.ringPos;
-        const waveform = new Float32Array(RING_SIZE);
-        waveform.set(this.ring.subarray(pos), 0);
-        waveform.set(this.ring.subarray(0, pos), RING_SIZE - pos);
+        const waveform = new Float32Array(WAVEFORM_DISPLAY_SIZE);
+        const step = RING_SIZE / WAVEFORM_DISPLAY_SIZE;
+        for (let i = 0; i < WAVEFORM_DISPLAY_SIZE; i++) {
+          const srcIdx = (pos + Math.floor(i * step)) % RING_SIZE;
+          waveform[i] = this.ring[srcIdx];
+        }
         const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
         this.peakSinceSend = 0;
         this.port.postMessage(
