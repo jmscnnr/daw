@@ -1,0 +1,236 @@
+@import "tailwindcss";
+
+:root {
+  --synth-bg: oklch(0.15 0.01 260);
+  --synth-surface: oklch(0.20 0.01 260);
+  --synth-panel: oklch(0.25 0.015 260);
+  --synth-accent: oklch(0.65 0.18 250);
+  --synth-active: oklch(0.70 0.20 145);
+  --synth-text: oklch(0.85 0.01 260);
+  --synth-muted: oklch(0.55 0.01 260);
+  --synth-border: oklch(0.30 0.01 260);
+
+  /* DAW theme tokens */
+  --daw-toolbar-bg: oklch(0.18 0.01 260);
+  --daw-track-lane: oklch(0.17 0.01 260);
+  --daw-track-lane-alt: oklch(0.19 0.01 260);
+  --daw-playhead: oklch(0.70 0.25 25);
+  --daw-grid-line: oklch(0.22 0.01 260);
+  --daw-grid-beat: oklch(0.28 0.01 260);
+  --daw-grid-bar: oklch(0.35 0.01 260);
+  --daw-clip-bg: oklch(0.45 0.15 250);
+  --daw-selection: oklch(0.65 0.18 250 / 0.3);
+  --daw-divider: oklch(0.25 0.01 260);
+}
+
+@theme inline {
+  --color-synth-bg: var(--synth-bg);
+  --color-synth-surface: var(--synth-surface);
+  --color-synth-panel: var(--synth-panel);
+  --color-synth-accent: var(--synth-accent);
+  --color-synth-active: var(--synth-active);
+  --color-synth-text: var(--synth-text);
+  --color-synth-muted: var(--synth-muted);
+  --color-synth-border: var(--synth-border);
+  --color-daw-toolbar-bg: var(--daw-toolbar-bg);
+  --color-daw-track-lane: var(--daw-track-lane);
+  --color-daw-track-lane-alt: var(--daw-track-lane-alt);
+  --color-daw-playhead: var(--daw-playhead);
+  --color-daw-grid-line: var(--daw-grid-line);
+  --color-daw-grid-beat: var(--daw-grid-beat);
+  --color-daw-grid-bar: var(--daw-grid-bar);
+  --color-daw-clip-bg: var(--daw-clip-bg);
+  --color-daw-selection: var(--daw-selection);
+  --color-daw-divider: var(--daw-divider);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--synth-bg);
+  color: var(--synth-text);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  overflow: hidden;
+}
+
+/* Custom slider styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-track {
+  background: oklch(0.28 0.01 260);
+  border-radius: 4px;
+  height: 6px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--synth-accent);
+  border-radius: 50%;
+  height: 14px;
+  width: 14px;
+  margin-top: -4px;
+}
+
+input[type="range"]::-moz-range-track {
+  background: oklch(0.28 0.01 260);
+  border-radius: 4px;
+  height: 6px;
+}
+
+input[type="range"]::-moz-range-thumb {
+  background: var(--synth-accent);
+  border-radius: 50%;
+  border: none;
+  height: 14px;
+  width: 14px;
+}
+
+/* Vertical slider styling */
+input[type="range"].vertical {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 14px;
+  padding: 0;
+  margin: 0;
+}
+
+input[type="range"].vertical::-webkit-slider-track {
+  background: transparent;
+  width: 14px;
+  height: 100%;
+}
+
+input[type="range"].vertical::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--synth-accent);
+  border-radius: 50%;
+  height: 14px;
+  width: 14px;
+}
+
+input[type="range"].vertical::-moz-range-track {
+  background: transparent;
+  width: 14px;
+  height: 100%;
+}
+
+input[type="range"].vertical::-webkit-slider-track {
+  width: 4px;
+}
+
+/* Track header inline sliders — transparent input over visible div groove */
+input[type="range"].track-slider {
+  background: transparent !important;
+}
+
+input[type="range"].track-slider::-webkit-slider-track {
+  background: transparent;
+  height: 14px;
+}
+
+input[type="range"].track-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 12px;
+  border-radius: 2px;
+  margin-top: -1px;
+  background: linear-gradient(180deg, oklch(0.78 0.01 260), oklch(0.52 0.01 260));
+  border: 1px solid oklch(0.45 0.01 260);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  cursor: pointer;
+}
+
+input[type="range"].track-slider::-moz-range-track {
+  background: transparent;
+  height: 14px;
+}
+
+input[type="range"].track-slider::-moz-range-thumb {
+  width: 10px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, oklch(0.78 0.01 260), oklch(0.52 0.01 260));
+  border: 1px solid oklch(0.45 0.01 260);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  cursor: pointer;
+}
+
+/* Scrollbar — dark themed */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: oklch(0.13 0.01 260);
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(0.30 0.01 260);
+  border-radius: 4px;
+  border: 2px solid oklch(0.13 0.01 260);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.38 0.01 260);
+}
+
+::-webkit-scrollbar-corner {
+  background: oklch(0.13 0.01 260);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.30 0.01 260) oklch(0.13 0.01 260);
+}
+
+/* Timeline horizontal scrollbar */
+input[type="range"].timeline-scrollbar {
+  background: transparent !important;
+}
+
+input[type="range"].timeline-scrollbar::-webkit-slider-track {
+  background: oklch(0.15 0.01 260);
+  border-radius: 3px;
+  height: 8px;
+}
+
+input[type="range"].timeline-scrollbar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 40px;
+  height: 10px;
+  border-radius: 3px;
+  background: oklch(0.35 0.01 260);
+  border: none;
+  cursor: pointer;
+  margin-top: -1px;
+}
+
+input[type="range"].timeline-scrollbar::-webkit-slider-thumb:hover {
+  background: oklch(0.42 0.01 260);
+}
+
+input[type="range"].timeline-scrollbar::-moz-range-track {
+  background: oklch(0.15 0.01 260);
+  border-radius: 3px;
+  height: 8px;
+}
+
+input[type="range"].timeline-scrollbar::-moz-range-thumb {
+  width: 40px;
+  height: 10px;
+  border-radius: 3px;
+  background: oklch(0.35 0.01 260);
+  border: none;
+  cursor: pointer;
+}
