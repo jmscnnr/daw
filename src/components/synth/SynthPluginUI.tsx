@@ -1,111 +1,160 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
-import { useAudioDisplayStore } from "@/stores/audio-display-store";
-import { useSynthStore, type SynthState } from "@/stores/synth-store";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { EnvelopePanel } from "./EnvelopePanel";
 import { FilterPanel } from "./FilterPanel";
 import { VolumePanel } from "./VolumePanel";
 import { OscBankPanel } from "./OscBankPanel";
 import { PianoKeyboard } from "./PianoKeyboard";
 import type { PluginInstance } from "@/types/plugin";
-import type { SynthPluginInstance } from "@/audio/plugins/builtin/synth-plugin";
+import type {
+  SynthPluginInstance,
+  SynthPluginParams,
+} from "@/audio/plugins/builtin/synth-plugin";
 
 interface SynthPluginUIProps {
   instance: PluginInstance;
 }
 
+function cloneParams(params: SynthPluginParams): SynthPluginParams {
+  return {
+    ...params,
+    oscConfigs: params.oscConfigs.map((config) => ({ ...config })),
+  };
+}
+
 export function SynthPluginUI({ instance }: SynthPluginUIProps) {
-  const activeNotes = useAudioDisplayStore((s) => s.activeNotes);
-  const prevInstanceRef = useRef<SynthPluginInstance | null>(null);
-
-  const synthInstance = instance as unknown as SynthPluginInstance;
+  const synthInstance = instance as SynthPluginInstance;
   const engine = synthInstance.getEngine();
+  const [params, setParams] = useState<SynthPluginParams>(() =>
+    cloneParams(synthInstance.params),
+  );
+  const activeNotes = useSyncExternalStore(
+    synthInstance.subscribeToAudioDisplay.bind(synthInstance),
+    () => synthInstance.getAudioDisplayState().activeNotes,
+    () => synthInstance.getAudioDisplayState().activeNotes,
+  );
 
-  // When switching to a different instance, save old instance's state and load new one
-  useEffect(() => {
-    const prev = prevInstanceRef.current;
-    if (prev && prev !== synthInstance) {
-      // Save outgoing instance's state from the store
-      prev.saveFromStore();
-    }
-    // Load incoming instance's state into the store
-    synthInstance.loadIntoStore();
-    prevInstanceRef.current = synthInstance;
+  const updateParams = useCallback(
+    (updater: (current: SynthPluginParams) => SynthPluginParams) => {
+      setParams((current) => {
+        const next = updater(current);
+        synthInstance.updateParams(next);
+        return next;
+      });
+    },
+    [synthInstance],
+  );
 
-    // On unmount, save the current instance's state
-    return () => {
-      synthInstance.saveFromStore();
-    };
-  }, [synthInstance]);
+  const handleEnvelopeChange = useCallback(
+    (
+      partial: Partial<
+        Pick<SynthPluginParams, "attack" | "decay" | "sustain" | "release">
+      >,
+    ) => {
+      updateParams((current) => ({ ...current, ...partial }));
+    },
+    [updateParams],
+  );
 
-  // Subscribe synth store → engine
-  useEffect(() => {
-    if (!engine) return;
+  const handleFilterChange = useCallback(
+    (
+      partial: Partial<
+        Pick<SynthPluginParams, "filterMode" | "filterCutoff" | "filterQ">
+      >,
+    ) => {
+      updateParams((current) => ({ ...current, ...partial }));
+    },
+    [updateParams],
+  );
 
-    let prev: SynthState = useSynthStore.getState();
+  const handleVolumeChange = useCallback(
+    (volume: number) => {
+      updateParams((current) => ({ ...current, volume }));
+    },
+    [updateParams],
+  );
 
-    const unsub = useSynthStore.subscribe((state) => {
-      if (
-        state.attack !== prev.attack ||
-        state.decay !== prev.decay ||
-        state.sustain !== prev.sustain ||
-        state.release !== prev.release
-      ) {
-        engine.setEnvelope(
-          state.attack,
-          state.decay,
-          state.sustain,
-          state.release,
-        );
-      }
+  const handleOscChange = useCallback(
+    (
+      index: number,
+      partial: Partial<SynthPluginParams["oscConfigs"][number]>,
+    ) => {
+      updateParams((current) => ({
+        ...current,
+        oscConfigs: current.oscConfigs.map((config, configIndex) =>
+          configIndex === index ? { ...config, ...partial } : config,
+        ),
+      }));
+    },
+    [updateParams],
+  );
 
-      if (
-        state.filterMode !== prev.filterMode ||
-        state.filterCutoff !== prev.filterCutoff ||
-        state.filterQ !== prev.filterQ
-      ) {
-        engine.setFilter(state.filterMode, state.filterCutoff, state.filterQ);
-      }
+  const handleAddOsc = useCallback(() => {
+    updateParams((current) => ({
+      ...current,
+      oscConfigs: [
+        ...current.oscConfigs,
+        { shape: "saw", octave: 0, fine: 0, level: 1.0 },
+      ],
+    }));
+  }, [updateParams]);
 
-      if (state.volume !== prev.volume) {
-        engine.setVolume(state.volume);
-      }
+  const handleRemoveOsc = useCallback(
+    (index: number) => {
+      updateParams((current) => {
+        if (current.oscConfigs.length <= 1) {
+          return current;
+        }
 
-      if (state.oscConfigs !== prev.oscConfigs) {
-        engine.setOscConfigs(state.oscConfigs);
-      }
-
-      // Keep per-instance params in sync
-      synthInstance.saveFromStore();
-
-      prev = state;
-    });
-
-    return unsub;
-  }, [engine, synthInstance]);
+        return {
+          ...current,
+          oscConfigs: current.oscConfigs.filter(
+            (_, oscIndex) => oscIndex !== index,
+          ),
+        };
+      });
+    },
+    [updateParams],
+  );
 
   const handleNoteOn = useCallback(
     (midi: number) => {
-      engine?.noteOn(midi);
+      engine.noteOn(midi);
     },
     [engine],
   );
 
   const handleNoteOff = useCallback(
     (midi: number) => {
-      engine?.noteOff(midi);
+      engine.noteOff(midi);
     },
     [engine],
   );
 
   return (
-    <div className="flex gap-2 p-2 h-full">
-      <EnvelopePanel />
-      <FilterPanel />
-      <VolumePanel />
-      <OscBankPanel />
-      <div className="flex-1 min-w-0 rounded-lg overflow-hidden border border-synth-border">
+    <div className="flex h-full gap-2 p-2">
+      <EnvelopePanel
+        attack={params.attack}
+        decay={params.decay}
+        sustain={params.sustain}
+        release={params.release}
+        onChange={handleEnvelopeChange}
+      />
+      <FilterPanel
+        filterMode={params.filterMode}
+        filterCutoff={params.filterCutoff}
+        filterQ={params.filterQ}
+        onChange={handleFilterChange}
+      />
+      <VolumePanel volume={params.volume} onChange={handleVolumeChange} />
+      <OscBankPanel
+        oscConfigs={params.oscConfigs}
+        onChange={handleOscChange}
+        onAdd={handleAddOsc}
+        onRemove={handleRemoveOsc}
+      />
+      <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-synth-border">
         <PianoKeyboard
           activeNotes={activeNotes}
           onNoteOn={handleNoteOn}

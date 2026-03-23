@@ -1,23 +1,26 @@
 "use client";
 
 import { memo, useCallback } from "react";
-import { useSynthStore } from "@/stores/synth-store";
 import type { OscConfig } from "@/audio/types";
 import { OscillatorRow } from "./OscillatorRow";
 import { Plus } from "lucide-react";
 
-export const OscBankPanel = memo(function OscBankPanel() {
-  const oscConfigs = useSynthStore((s) => s.oscConfigs);
-  const updateOscConfig = useSynthStore((s) => s.updateOscConfig);
-  const addOsc = useSynthStore((s) => s.addOsc);
-  const removeOsc = useSynthStore((s) => s.removeOsc);
+interface OscBankPanelProps {
+  oscConfigs: OscConfig[];
+  onChange: (index: number, partial: Partial<OscConfig>) => void;
+  onAdd: () => void;
+  onRemove: (index: number) => void;
+}
 
-  const handleChange = useCallback(
-    (index: number, partial: Partial<OscConfig>) => {
-      updateOscConfig(index, partial);
-    },
-    [updateOscConfig],
-  );
+export const OscBankPanel = memo(function OscBankPanel({
+  oscConfigs,
+  onChange,
+  onAdd,
+  onRemove,
+}: OscBankPanelProps) {
+  const handleChange = useCallback((index: number, partial: Partial<OscConfig>) => {
+    onChange(index, partial);
+  }, [onChange]);
 
   return (
     <div className="bg-synth-panel rounded-lg p-2 border border-synth-border flex flex-col min-w-0">
@@ -30,13 +33,13 @@ export const OscBankPanel = memo(function OscBankPanel() {
             config={config}
             canRemove={oscConfigs.length > 1}
             onChange={handleChange}
-            onRemove={removeOsc}
+            onRemove={onRemove}
           />
         ))}
       </div>
       <button
         type="button"
-        onClick={addOsc}
+        onClick={onAdd}
         className="mt-2 w-full flex items-center justify-center gap-1 text-xs text-synth-accent border border-synth-border rounded py-1 hover:bg-synth-surface transition-colors"
       >
         <Plus size={12} />

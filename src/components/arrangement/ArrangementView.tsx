@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useEffect, useState } from "react";
 import { TrackHeaderList } from "./TrackHeaderList";
 import { TimelineCanvas } from "./TimelineCanvas";
+import { useCommandHistory } from "@/stores/command-history";
 import { useUIStore } from "@/stores/ui-store";
 import { useProjectStore } from "@/stores/project-store";
+import { CreateTrackCommand } from "@/commands/track-commands";
 import { PPQ } from "@/lib/constants";
-import { TRACK_HEIGHT } from "./TrackHeader";
 
 /** Total timeline length in bars for scrollbar calculation */
 const TOTAL_BARS = 200;
@@ -19,8 +20,8 @@ export function ArrangementView() {
   const horizontalZoom = useUIStore((s) => s.horizontalZoom);
   const scrollY = useUIStore((s) => s.scrollY);
   const timeSignature = useProjectStore((s) => s.project.timeSignature);
-  const addTrack = useProjectStore((s) => s.addTrack);
-  const trackCount = useProjectStore((s) => s.project.tracks.length);
+  const executeCommand = useCommandHistory((s) => s.execute);
+  const [containerWidth, setContainerWidth] = useState(800);
 
   const ticksPerBar = PPQ * timeSignature.numerator;
   const totalTicks = TOTAL_BARS * ticksPerBar;
@@ -35,9 +36,23 @@ export function ArrangementView() {
   );
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const containerWidth = containerRef.current?.getBoundingClientRect().width ?? 800;
   const visibleTicks = containerWidth / pixelsPerTick;
   const maxScroll = Math.max(0, totalTicks - visibleTicks);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) {
+        setContainerWidth(entry.contentRect.width);
+      }
+    });
+    observer.observe(container);
+    setContainerWidth(container.getBoundingClientRect().width);
+
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
@@ -59,7 +74,7 @@ export function ArrangementView() {
           {/* Add track button — pinned at bottom */}
           <div className="shrink-0 border-t border-synth-border p-2">
             <button
-              onClick={() => addTrack("midi")}
+              onClick={() => executeCommand(new CreateTrackCommand("midi"))}
               className="w-full rounded border border-synth-border bg-synth-surface px-2 py-1 text-xs text-synth-muted transition-colors hover:bg-synth-panel hover:text-synth-text"
             >
               + Add Track

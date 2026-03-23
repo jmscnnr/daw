@@ -1,6 +1,8 @@
 "use client";
 
 import { useProjectStore } from "@/stores/project-store";
+import { useCommandHistory } from "@/stores/command-history";
+import { CreateTrackCommand } from "@/commands/track-commands";
 import { TrackHeader } from "./TrackHeader";
 import { useCallback } from "react";
 import { Plus } from "lucide-react";
@@ -12,11 +14,11 @@ interface TrackHeaderListProps {
 
 export function TrackHeaderList({ noRulerSpacer, noAddButton }: TrackHeaderListProps) {
   const tracks = useProjectStore((s) => s.project.tracks);
-  const addTrack = useProjectStore((s) => s.addTrack);
+  const executeCommand = useCommandHistory((s) => s.execute);
 
   const handleAddTrack = useCallback(() => {
-    addTrack("midi");
-  }, [addTrack]);
+    executeCommand(new CreateTrackCommand("midi"));
+  }, [executeCommand]);
 
   return (
     <div className="flex h-full flex-col">

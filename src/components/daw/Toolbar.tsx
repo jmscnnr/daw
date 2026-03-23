@@ -3,16 +3,21 @@
 import { TransportControls } from "./TransportControls";
 import { useProjectStore } from "@/stores/project-store";
 import { useCommandHistory } from "@/stores/command-history";
+import { SetProjectNameCommand } from "@/commands/track-commands";
 import { useUIStore } from "@/stores/ui-store";
 import { useRef, useState } from "react";
 import { Magnet, Undo2, Redo2, ChevronDown } from "lucide-react";
 import { ProjectModal } from "./ProjectModal";
 import { WaveformCanvas } from "@/components/synth/WaveformCanvas";
+import type { PluginInstance } from "@/types/plugin";
 
-export function Toolbar() {
+interface ToolbarProps {
+  selectedPlugin: PluginInstance | null;
+}
+
+export function Toolbar({ selectedPlugin }: ToolbarProps) {
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const projectName = useProjectStore((s) => s.project.name);
-  const setProjectName = useProjectStore((s) => s.setProjectName);
   const [editingName, setEditingName] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const canUndo = useCommandHistory((s) => s.canUndo);
@@ -37,7 +42,9 @@ export function Toolbar() {
             className="bg-synth-bg text-sm text-synth-text border border-synth-border rounded px-2 py-0.5 text-center outline-none focus:border-synth-accent"
             onBlur={(e) => {
               const v = e.target.value.trim();
-              if (v) setProjectName(v);
+              if (v && v !== projectName) {
+                useCommandHistory.getState().execute(new SetProjectNameCommand(v));
+              }
               setEditingName(false);
             }}
             onKeyDown={(e) => {
@@ -87,7 +94,10 @@ export function Toolbar() {
         <div className="mx-1 h-5 w-px bg-synth-border" />
 
         {/* Waveform */}
-        <WaveformCanvas className="relative h-6 w-28 rounded overflow-hidden border border-synth-border" />
+        <WaveformCanvas
+          plugin={selectedPlugin}
+          className="relative h-6 w-28 rounded overflow-hidden border border-synth-border"
+        />
 
         <div className="mx-1 h-5 w-px bg-synth-border" />
 

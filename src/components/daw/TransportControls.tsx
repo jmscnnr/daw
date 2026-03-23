@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTransportStore } from "@/stores/transport-store";
 import { useProjectStore } from "@/stores/project-store";
+import { useCommandHistory } from "@/stores/command-history";
+import { SetBPMCommand } from "@/commands/track-commands";
 import { ticksToBarBeat } from "@/lib/time";
 import { Play, Pause, Square, Repeat, Circle } from "lucide-react";
 
@@ -19,7 +21,7 @@ export function TransportControls() {
 
   const bpm = useProjectStore((s) => s.project.bpm);
   const timeSignature = useProjectStore((s) => s.project.timeSignature);
-  const setBPM = useProjectStore((s) => s.setBPM);
+  const executeCommand = useCommandHistory((s) => s.execute);
 
   const { bar, beat } = ticksToBarBeat(positionTicks, timeSignature.numerator);
 
@@ -37,23 +39,21 @@ export function TransportControls() {
 
   const [bpmInput, setBpmInput] = useState(String(bpm));
   const [bpmFocused, setBpmFocused] = useState(false);
-
-  // Sync external bpm changes when not focused
-  useEffect(() => {
-    if (!bpmFocused) setBpmInput(String(bpm));
-  }, [bpm, bpmFocused]);
+  const displayedBpmInput = bpmFocused ? bpmInput : String(bpm);
 
   const commitBpm = useCallback(
     (raw: string) => {
       const value = parseInt(raw, 10);
       if (!isNaN(value) && value >= 20 && value <= 300) {
-        setBPM(value);
+        if (value !== bpm) {
+          executeCommand(new SetBPMCommand(value));
+        }
         setBpmInput(String(value));
       } else {
         setBpmInput(String(bpm));
       }
     },
-    [setBPM, bpm],
+    [executeCommand, bpm],
   );
 
   const handleBPMChange = useCallback(
@@ -106,7 +106,7 @@ export function TransportControls() {
         <input
           type="text"
           inputMode="numeric"
-          value={bpmInput}
+          value={displayedBpmInput}
           onChange={handleBPMChange}
           onFocus={() => setBpmFocused(true)}
           onBlur={(e) => {

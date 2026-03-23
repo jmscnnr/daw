@@ -1,7 +1,6 @@
 "use client";
 
 import { memo, useCallback } from "react";
-import { useSynthStore } from "@/stores/synth-store";
 
 function sliderToFreq(v: number): number {
   return 20.0 * Math.pow(10.0, (3.0 * v) / 1000.0);
@@ -23,31 +22,45 @@ const FILTER_TYPES = [
   { value: "bp" as const, label: "Band Pass" },
 ];
 
-export const FilterPanel = memo(function FilterPanel() {
-  const filterMode = useSynthStore((s) => s.filterMode);
-  const filterCutoff = useSynthStore((s) => s.filterCutoff);
-  const filterQ = useSynthStore((s) => s.filterQ);
-  const setFilter = useSynthStore((s) => s.setFilter);
+interface FilterPanelProps {
+  filterMode: "off" | "lp" | "hp" | "bp";
+  filterCutoff: number;
+  filterQ: number;
+  onChange: (
+    params: Partial<{
+      filterMode: "off" | "lp" | "hp" | "bp";
+      filterCutoff: number;
+      filterQ: number;
+    }>,
+  ) => void;
+}
+
+export const FilterPanel = memo(function FilterPanel({
+  filterMode,
+  filterCutoff,
+  filterQ,
+  onChange,
+}: FilterPanelProps) {
 
   const onModeChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
-      setFilter({ filterMode: e.target.value as "off" | "lp" | "hp" | "bp" });
+      onChange({ filterMode: e.target.value as "off" | "lp" | "hp" | "bp" });
     },
-    [setFilter],
+    [onChange],
   );
 
   const onCutoffChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setFilter({ filterCutoff: sliderToFreq(Number(e.target.value)) });
+      onChange({ filterCutoff: sliderToFreq(Number(e.target.value)) });
     },
-    [setFilter],
+    [onChange],
   );
 
   const onQChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setFilter({ filterQ: Number(e.target.value) / 100 });
+      onChange({ filterQ: Number(e.target.value) / 100 });
     },
-    [setFilter],
+    [onChange],
   );
 
   return (

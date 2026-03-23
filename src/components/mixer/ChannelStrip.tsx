@@ -2,9 +2,17 @@
 
 import { memo, useCallback, useRef } from "react";
 import { useProjectStore } from "@/stores/project-store";
+import { useCommandHistory } from "@/stores/command-history";
 import { useUIStore } from "@/stores/ui-store";
+import { useGestureSnapshot } from "@/hooks/use-gesture-snapshot";
 import { useMeterStore } from "@/stores/meter-store";
 import type { Track } from "@/types/project";
+import {
+  SetTrackPanCommand,
+  SetTrackVolumeCommand,
+  ToggleTrackMuteCommand,
+  ToggleTrackSoloCommand,
+} from "@/commands/track-commands";
 
 const DB_MIN = -60;
 const DB_MAX = 6;
@@ -35,11 +43,15 @@ export const ChannelStrip = memo(function ChannelStrip({
 }: ChannelStripProps) {
   const setTrackVolume = useProjectStore((s) => s.setTrackVolume);
   const setTrackPan = useProjectStore((s) => s.setTrackPan);
-  const toggleMute = useProjectStore((s) => s.toggleTrackMute);
-  const toggleSolo = useProjectStore((s) => s.toggleTrackSolo);
+  const executeCommand = useCommandHistory((s) => s.execute);
   const selectedTrackId = useUIStore((s) => s.selectedTrackId);
   const setSelectedTrack = useUIStore((s) => s.setSelectedTrack);
   const peakDb = useMeterStore((s) => s.levels[track.id] ?? -Infinity);
+
+  const volumeChanged = useCallback((a: Track, b: Track) => a.volume !== b.volume, []);
+  const panChanged = useCallback((a: Track, b: Track) => a.pan !== b.pan, []);
+  const volumeGesture = useGestureSnapshot(track.id, "Set Track Volume", volumeChanged);
+  const panGesture = useGestureSnapshot(track.id, "Set Track Pan", panChanged);
 
   // Fader uses dB scale mapped to pixels for linear feel
   const faderRef = useRef<HTMLDivElement>(null);
@@ -74,11 +86,12 @@ export const ChannelStrip = memo(function ChannelStrip({
 
   const handlePanPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      panGesture.begin();
       panDraggingRef.current = true;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       setPanFromX(e.clientX);
     },
-    [setPanFromX],
+    [panGesture.begin, setPanFromX],
   );
 
   const handlePanPointerMove = useCallback(
@@ -91,7 +104,8 @@ export const ChannelStrip = memo(function ChannelStrip({
 
   const handlePanPointerUp = useCallback(() => {
     panDraggingRef.current = false;
-  }, []);
+    panGesture.commit();
+  }, [panGesture.commit]);
 
   // Custom fader drag — maps y position to dB
   const setVolumeFromY = useCallback(
@@ -109,11 +123,12 @@ export const ChannelStrip = memo(function ChannelStrip({
 
   const handleFaderPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      volumeGesture.begin();
       draggingRef.current = true;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       setVolumeFromY(e.clientY);
     },
-    [setVolumeFromY],
+    [volumeGesture.begin, setVolumeFromY],
   );
 
   const handleFaderPointerMove = useCallback(
@@ -126,7 +141,8 @@ export const ChannelStrip = memo(function ChannelStrip({
 
   const handleFaderPointerUp = useCallback(() => {
     draggingRef.current = false;
-  }, []);
+    volumeGesture.commit();
+  }, [volumeGesture.commit]);
 
   const isSelected = selectedTrackId === track.id;
 
@@ -153,7 +169,7 @@ export const ChannelStrip = memo(function ChannelStrip({
           onPointerMove={handlePanPointerMove}
           onPointerUp={handlePanPointerUp}
           onPointerCancel={handlePanPointerUp}
-          onDoubleClick={() => setTrackPan(track.id, 0)}
+          onDoubleClick={() => executeCommand(new SetTrackPanCommand(track.id, 0))}
         >
           {/* Center line */}
           <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-[#555]" />
@@ -201,7 +217,7 @@ export const ChannelStrip = memo(function ChannelStrip({
           onPointerMove={handleFaderPointerMove}
           onPointerUp={handleFaderPointerUp}
           onPointerCancel={handleFaderPointerUp}
-          onDoubleClick={() => setTrackVolume(track.id, dbToVolume(0))}
+          onDoubleClick={() => executeCommand(new SetTrackVolumeCommand(track.id, dbToVolume(0)))}
         >
           {/* Fader groove */}
           <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-[3px] bg-[#3a3a3a] rounded-sm" />
@@ -266,7 +282,7 @@ export const ChannelStrip = memo(function ChannelStrip({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            toggleSolo(track.id);
+            executeCommand(new ToggleTrackSoloCommand(track.id));
           }}
           className={`flex-1 h-[22px] text-[10px] font-bold transition-colors border-r border-[#2a2a2a] ${
             track.solo
@@ -279,7 +295,7 @@ export const ChannelStrip = memo(function ChannelStrip({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            toggleMute(track.id);
+            executeCommand(new ToggleTrackMuteCommand(track.id));
           }}
           className={`flex-1 h-[22px] text-[10px] font-bold transition-colors ${
             track.mute

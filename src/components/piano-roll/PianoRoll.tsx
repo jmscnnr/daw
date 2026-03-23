@@ -31,6 +31,7 @@ interface PianoRollProps {
 }
 
 export function PianoRoll({ clip, trackId }: PianoRollProps) {
+  const isMidiClip = clip.content.type === "midi";
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const keysCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -73,28 +74,26 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
     }
   }, [trackId, sendMidiToTrack]);
 
-  if (clip.content.type !== "midi") {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-synth-muted">
-        Not a MIDI clip
-      </div>
-    );
-  }
-
   const pixelsPerTick = zoom / PPQ;
   const quantizeTicks = PPQ / 4; // 16th note
 
-  const snapToGrid = (tick: number) =>
-    Math.round(tick / quantizeTicks) * quantizeTicks;
+  const snapToGrid = useCallback(
+    (tick: number) => Math.round(tick / quantizeTicks) * quantizeTicks,
+    [quantizeTicks],
+  );
 
-  const yForNote = (note: number) =>
-    HEADER_HEIGHT + (MAX_NOTE - note - 1) * NOTE_HEIGHT - scrollY;
+  const yForNote = useCallback(
+    (note: number) => HEADER_HEIGHT + (MAX_NOTE - note - 1) * NOTE_HEIGHT - scrollY,
+    [scrollY],
+  );
 
-  const noteForY = (y: number) =>
-    MAX_NOTE - 1 - Math.floor((y - HEADER_HEIGHT + scrollY) / NOTE_HEIGHT);
+  const noteForY = useCallback(
+    (y: number) => MAX_NOTE - 1 - Math.floor((y - HEADER_HEIGHT + scrollY) / NOTE_HEIGHT),
+    [scrollY],
+  );
 
   // x is relative to the grid container (keys are separate)
-  const tickForX = (x: number) => x / pixelsPerTick;
+  const tickForX = useCallback((x: number) => x / pixelsPerTick, [pixelsPerTick]);
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -301,7 +300,7 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
         kctx.stroke();
       }
     }
-  }, [clip.id, trackId, scrollY, zoom, pixelsPerTick, quantizeTicks]);
+  }, [clip.durationTicks, clip.id, pixelsPerTick, quantizeTicks, trackId, yForNote]);
 
   useEffect(() => {
     render();
@@ -400,7 +399,19 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
         container.setPointerCapture(e.pointerId);
       }
     },
-    [trackId, clip.id, scrollY, zoom, render, removeNote, pixelsPerTick, quantizeTicks, previewNoteOn],
+    [
+      trackId,
+      clip.id,
+      clip.durationTicks,
+      render,
+      removeNote,
+      pixelsPerTick,
+      quantizeTicks,
+      previewNoteOn,
+      noteForY,
+      snapToGrid,
+      tickForX,
+    ],
   );
 
   const handlePointerMove = useCallback(
@@ -464,11 +475,22 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
         d.startNote = note;
       }
     },
-    [trackId, clip.id, scrollY, zoom, render, updateNote, quantizeTicks, pixelsPerTick, previewNoteOn],
+    [
+      trackId,
+      clip.id,
+      clip.durationTicks,
+      render,
+      updateNote,
+      quantizeTicks,
+      previewNoteOn,
+      noteForY,
+      snapToGrid,
+      tickForX,
+    ],
   );
 
   const handlePointerUp = useCallback(
-    (_e: React.PointerEvent) => {
+    () => {
       const d = dragRef.current;
       if (!d?.active) return;
 
@@ -499,7 +521,7 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
       dragRef.current = null;
       render();
     },
-    [trackId, clip.id, addNote, render, quantizeTicks, previewNoteOff],
+    [trackId, clip.id, clip.durationTicks, addNote, render, quantizeTicks, previewNoteOff],
   );
 
   const handleWheel = useCallback(
@@ -541,7 +563,7 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
       });
       container.setPointerCapture(e.pointerId);
     },
-    [trackId, sendMidiToTrack, scrollY],
+    [trackId, sendMidiToTrack, noteForY],
   );
 
   const handleKeyPointerMove = useCallback(
@@ -572,11 +594,11 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
         });
       }
     },
-    [trackId, sendMidiToTrack, scrollY],
+    [trackId, sendMidiToTrack, noteForY],
   );
 
   const handleKeyPointerUp = useCallback(
-    (_e: React.PointerEvent) => {
+    () => {
       if (previewNoteRef.current !== null) {
         sendMidiToTrack(trackId, {
           type: "noteOff",
@@ -589,6 +611,14 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
     },
     [trackId, sendMidiToTrack],
   );
+
+  if (!isMidiClip) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-synth-muted">
+        Not a MIDI clip
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col bg-synth-bg">

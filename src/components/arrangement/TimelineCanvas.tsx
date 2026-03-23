@@ -4,7 +4,11 @@ import { useRef, useEffect, useCallback } from "react";
 import { useProjectStore } from "@/stores/project-store";
 import { useTransportStore } from "@/stores/transport-store";
 import { useUIStore } from "@/stores/ui-store";
+import { useCommandHistory } from "@/stores/command-history";
+import { AddClipCommand, SplitClipCommand } from "@/commands/clip-commands";
+import { cloneProject, createProjectSnapshotCommand } from "@/commands/project-command-base";
 import { PPQ } from "@/lib/constants";
+import type { Project } from "@/types/project";
 import { TRACK_HEIGHT } from "./TrackHeader";
 
 const RULER_HEIGHT = 28;
@@ -18,6 +22,108 @@ type DragMode =
   | null;
 
 const RESIZE_HANDLE_PX = 6;
+
+type TimelineProjectSlice = {
+  bpm: number;
+  timeSignatureNumerator: number;
+  tracks: Array<{
+    id: string;
+    color: string;
+    clips: Project["tracks"][number]["clips"];
+  }>;
+};
+
+type TimelineUISlice = {
+  horizontalZoom: number;
+  scrollX: number;
+  scrollY: number;
+  selectedClipIds: string[];
+};
+
+type TimelineTransportSlice = {
+  state: ReturnType<typeof useTransportStore.getState>["state"];
+  positionTicks: number;
+  loopEnabled: boolean;
+  loopRegion: ReturnType<typeof useTransportStore.getState>["loopRegion"];
+};
+
+function selectTimelineProjectSlice(state: { project: Project }): TimelineProjectSlice {
+  return {
+    bpm: state.project.bpm,
+    timeSignatureNumerator: state.project.timeSignature.numerator,
+    tracks: state.project.tracks.map((track) => ({
+      id: track.id,
+      color: track.color,
+      clips: track.clips,
+    })),
+  };
+}
+
+function areTimelineProjectSlicesEqual(
+  previous: TimelineProjectSlice,
+  next: TimelineProjectSlice,
+): boolean {
+  if (
+    previous.bpm !== next.bpm ||
+    previous.timeSignatureNumerator !== next.timeSignatureNumerator ||
+    previous.tracks.length !== next.tracks.length
+  ) {
+    return false;
+  }
+
+  return previous.tracks.every((track, index) => {
+    const nextTrack = next.tracks[index];
+    return (
+      nextTrack !== undefined &&
+      track.id === nextTrack.id &&
+      track.color === nextTrack.color &&
+      track.clips === nextTrack.clips
+    );
+  });
+}
+
+function selectTimelineUISlice(state: ReturnType<typeof useUIStore.getState>): TimelineUISlice {
+  return {
+    horizontalZoom: state.horizontalZoom,
+    scrollX: state.scrollX,
+    scrollY: state.scrollY,
+    selectedClipIds: state.selectedClipIds,
+  };
+}
+
+function areTimelineUISlicesEqual(previous: TimelineUISlice, next: TimelineUISlice): boolean {
+  return (
+    previous.horizontalZoom === next.horizontalZoom &&
+    previous.scrollX === next.scrollX &&
+    previous.scrollY === next.scrollY &&
+    previous.selectedClipIds.length === next.selectedClipIds.length &&
+    previous.selectedClipIds.every((clipId, index) => clipId === next.selectedClipIds[index])
+  );
+}
+
+function selectTimelineTransportSlice(
+  state: ReturnType<typeof useTransportStore.getState>,
+): TimelineTransportSlice {
+  return {
+    state: state.state,
+    positionTicks: state.positionTicks,
+    loopEnabled: state.loopEnabled,
+    loopRegion: state.loopRegion,
+  };
+}
+
+function areTimelineTransportSlicesEqual(
+  previous: TimelineTransportSlice,
+  next: TimelineTransportSlice,
+): boolean {
+  return (
+    previous.state === next.state &&
+    previous.positionTicks === next.positionTicks &&
+    previous.loopEnabled === next.loopEnabled &&
+    previous.loopRegion?.startTick === next.loopRegion?.startTick &&
+    previous.loopRegion?.endTick === next.loopRegion?.endTick
+  );
+}
 
 function renderTimeline(canvas: HTMLCanvasElement, container: HTMLDivElement) {
   const dpr = window.devicePixelRatio || 1;
@@ -257,6 +363,9 @@ export function TimelineCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
+  const dragStartProjectRef = useRef<Project | null>(null);
+  const executeCommand = useCommandHistory((s) => s.execute);
+  const commitCommand = useCommandHistory((s) => s.commit);
 
   // Use a ref for the animation loop to avoid self-reference issues
   const animateRef = useRef<() => void>(() => {});
@@ -273,8 +382,6 @@ export function TimelineCanvas() {
   const snapTick = useCallback((tick: number) => {
     const { snapEnabled } = useUIStore.getState();
     if (!snapEnabled) return tick;
-    const { project } = useProjectStore.getState();
-    const beatsPerBar = project.timeSignature.numerator;
     const ticksPerBeat = PPQ;
     // Snap to beat
     return Math.round(tick / ticksPerBeat) * ticksPerBeat;
@@ -333,16 +440,19 @@ export function TimelineCanvas() {
     );
     if (overlaps) return;
 
-    const clipId = useProjectStore.getState().addClip(track.id, {
+    const command = new AddClipCommand(track.id, {
       name: `${track.name} clip`,
       startTick: barStart,
       durationTicks: ticksPerBar,
       content: { type: "midi", notes: [] },
     });
+    executeCommand(command);
+    const clipId = command.getClipId();
+    if (!clipId) return;
 
     useUIStore.getState().setSelectedTrack(track.id);
     useUIStore.getState().setEditingClip(clipId);
-  }, [getTickFromX, findClipAt]);
+  }, [executeCommand, getTickFromX, findClipAt]);
 
   // Pointer down: start scrubbing playhead or dragging a clip
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -424,6 +534,7 @@ export function TimelineCanvas() {
       const nearRightEdge = Math.abs(x - clipRightX) < RESIZE_HANDLE_PX + 2;
 
       if (nearRightEdge) {
+        dragStartProjectRef.current = cloneProject(useProjectStore.getState().project);
         container.style.cursor = "ew-resize";
         dragRef.current = {
           type: "clip-resize",
@@ -432,6 +543,7 @@ export function TimelineCanvas() {
           minDuration: PPQ,
         };
       } else {
+        dragStartProjectRef.current = cloneProject(useProjectStore.getState().project);
         container.style.cursor = "grabbing";
         const offsetTick = clickTick - hit.clip.startTick;
         dragRef.current = {
@@ -562,7 +674,25 @@ export function TimelineCanvas() {
     }
   }, [getTickFromX, snapTick]);
 
-  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerUp = useCallback(() => {
+    if (dragRef.current?.type === "clip" || dragRef.current?.type === "clip-resize") {
+      const before = dragStartProjectRef.current;
+      dragStartProjectRef.current = null;
+
+      if (before) {
+        const after = cloneProject(useProjectStore.getState().project);
+        if (before.modifiedAt !== after.modifiedAt) {
+          commitCommand(
+            createProjectSnapshotCommand(
+              dragRef.current.type === "clip" ? "Move Clip" : "Resize Clip",
+              before,
+              after,
+            ),
+          );
+        }
+      }
+    }
+
     if (dragRef.current?.type === "loop-region") {
       const { loopRegion, loopEnabled } = useTransportStore.getState();
       if (loopRegion && loopRegion.endTick > loopRegion.startTick) {
@@ -573,7 +703,7 @@ export function TimelineCanvas() {
     dragRef.current = null;
     const container = containerRef.current;
     if (container) container.style.cursor = "default";
-  }, []);
+  }, [commitCommand]);
 
   useEffect(() => {
     const draw = () => {
@@ -611,6 +741,7 @@ export function TimelineCanvas() {
         if (selectedClipIds.length === 0) return;
 
         e.preventDefault();
+        const before = cloneProject(useProjectStore.getState().project);
         const { project } = useProjectStore.getState();
         const store = useProjectStore.getState();
 
@@ -626,6 +757,8 @@ export function TimelineCanvas() {
           }
         }
         useUIStore.getState().setSelectedClips([]);
+        const after = cloneProject(useProjectStore.getState().project);
+        commitCommand(createProjectSnapshotCommand("Delete Clip", before, after));
         return;
       }
 
@@ -642,7 +775,9 @@ export function TimelineCanvas() {
           const clip = track.clips.find((c) => c.id === clipId);
           if (clip) {
             e.preventDefault();
-            const rightId = useProjectStore.getState().splitClip(track.id, clipId, positionTicks);
+            const command = new SplitClipCommand(track.id, clipId, positionTicks);
+            executeCommand(command);
+            const rightId = command.getRightClipId();
             if (rightId) {
               useUIStore.getState().setSelectedClips([rightId]);
             }
@@ -656,17 +791,29 @@ export function TimelineCanvas() {
 
     // Store subscriptions
     const unsubs = [
-      useProjectStore.subscribe(() => draw()),
-      useTransportStore.subscribe((state, prev) => {
+      useProjectStore.subscribe(selectTimelineProjectSlice, () => draw(), {
+        equalityFn: areTimelineProjectSlicesEqual,
+      }),
+      useTransportStore.subscribe(selectTimelineTransportSlice, (state, prev) => {
         if (state.state === "playing" && prev.state !== "playing") {
           rafRef.current = requestAnimationFrame(animateRef.current);
         }
-        if (state.state !== "playing") {
+        if (
+          state.state !== "playing" ||
+          prev.state !== state.state ||
+          prev.loopEnabled !== state.loopEnabled ||
+          prev.loopRegion?.startTick !== state.loopRegion?.startTick ||
+          prev.loopRegion?.endTick !== state.loopRegion?.endTick
+        ) {
           cancelAnimationFrame(rafRef.current);
           draw();
         }
+      }, {
+        equalityFn: areTimelineTransportSlicesEqual,
       }),
-      useUIStore.subscribe(() => draw()),
+      useUIStore.subscribe(selectTimelineUISlice, () => draw(), {
+        equalityFn: areTimelineUISlicesEqual,
+      }),
     ];
 
     return () => {
@@ -675,7 +822,7 @@ export function TimelineCanvas() {
       cancelAnimationFrame(rafRef.current);
       unsubs.forEach((u) => u());
     };
-  }, []);
+  }, [commitCommand, executeCommand]);
 
   // Wheel handler: scroll horizontally, vertically, or zoom with Ctrl
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {

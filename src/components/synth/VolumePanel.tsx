@@ -1,17 +1,22 @@
 "use client";
 
 import { memo, useCallback } from "react";
-import { useSynthStore } from "@/stores/synth-store";
 
-export const VolumePanel = memo(function VolumePanel() {
-  const volume = useSynthStore((s) => s.volume);
-  const setVolume = useSynthStore((s) => s.setVolume);
+interface VolumePanelProps {
+  volume: number;
+  onChange: (volume: number) => void;
+}
 
-  const onChange = useCallback(
+export const VolumePanel = memo(function VolumePanel({
+  volume,
+  onChange,
+}: VolumePanelProps) {
+
+  const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setVolume(Number(e.target.value) / 100);
+      onChange(Number(e.target.value) / 100);
     },
-    [setVolume],
+    [onChange],
   );
 
   return (
@@ -28,7 +33,7 @@ export const VolumePanel = memo(function VolumePanel() {
             max={100}
             step={1}
             value={Math.round(volume * 100)}
-            onChange={onChange}
+            onChange={handleChange}
             aria-label="Master volume"
             aria-valuetext={`${Math.round(volume * 100)}%`}
           />

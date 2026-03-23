@@ -1,7 +1,6 @@
 "use client";
 
 import { memo, useCallback } from "react";
-import { useSynthStore } from "@/stores/synth-store";
 
 interface VerticalSliderProps {
   label: string;
@@ -34,17 +33,32 @@ function VerticalSlider({ label, ariaLabel, value, onChange }: VerticalSliderPro
   );
 }
 
-export const EnvelopePanel = memo(function EnvelopePanel() {
-  const attack = useSynthStore((s) => s.attack);
-  const decay = useSynthStore((s) => s.decay);
-  const sustain = useSynthStore((s) => s.sustain);
-  const release = useSynthStore((s) => s.release);
-  const setEnvelope = useSynthStore((s) => s.setEnvelope);
+interface EnvelopePanelProps {
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+  onChange: (
+    params: Partial<{
+      attack: number;
+      decay: number;
+      sustain: number;
+      release: number;
+    }>,
+  ) => void;
+}
 
-  const onAttack = useCallback((v: number) => setEnvelope({ attack: v }), [setEnvelope]);
-  const onDecay = useCallback((v: number) => setEnvelope({ decay: v }), [setEnvelope]);
-  const onSustain = useCallback((v: number) => setEnvelope({ sustain: v }), [setEnvelope]);
-  const onRelease = useCallback((v: number) => setEnvelope({ release: v }), [setEnvelope]);
+export const EnvelopePanel = memo(function EnvelopePanel({
+  attack,
+  decay,
+  sustain,
+  release,
+  onChange,
+}: EnvelopePanelProps) {
+  const onAttack = useCallback((v: number) => onChange({ attack: v }), [onChange]);
+  const onDecay = useCallback((v: number) => onChange({ decay: v }), [onChange]);
+  const onSustain = useCallback((v: number) => onChange({ sustain: v }), [onChange]);
+  const onRelease = useCallback((v: number) => onChange({ release: v }), [onChange]);
 
   return (
     <div className="bg-synth-panel rounded-lg p-2 border border-synth-border flex flex-col min-w-0">

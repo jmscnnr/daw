@@ -2,11 +2,22 @@
 
 import { memo, useCallback, useState, useRef, useEffect } from "react";
 import { useProjectStore } from "@/stores/project-store";
+import { useCommandHistory } from "@/stores/command-history";
 import { useUIStore } from "@/stores/ui-store";
 import { usePluginActions } from "@/hooks/use-plugin-actions";
+import { useGestureSnapshot } from "@/hooks/use-gesture-snapshot";
 import { useMeterStore } from "@/stores/meter-store";
 import { getPluginsByType } from "@/audio/plugins/plugin-registry";
 import type { Track } from "@/types/project";
+import {
+  DeleteTrackCommand,
+  RenameTrackCommand,
+  SetTrackPanCommand,
+  SetTrackVolumeCommand,
+  ToggleTrackArmCommand,
+  ToggleTrackMuteCommand,
+  ToggleTrackSoloCommand,
+} from "@/commands/track-commands";
 import { X, Trash2 } from "lucide-react";
 
 const TRACK_HEIGHT = 76;
@@ -32,13 +43,9 @@ export const TrackHeader = memo(function TrackHeader({
   track,
   index,
 }: TrackHeaderProps) {
-  const renameTrack = useProjectStore((s) => s.renameTrack);
-  const toggleMute = useProjectStore((s) => s.toggleTrackMute);
-  const toggleSolo = useProjectStore((s) => s.toggleTrackSolo);
-  const toggleArm = useProjectStore((s) => s.toggleTrackArm);
-  const removeTrack = useProjectStore((s) => s.removeTrack);
   const setTrackVolume = useProjectStore((s) => s.setTrackVolume);
   const setTrackPan = useProjectStore((s) => s.setTrackPan);
+  const executeCommand = useCommandHistory((s) => s.execute);
   const selectedTrackId = useUIStore((s) => s.selectedTrackId);
   const setSelectedTrack = useUIStore((s) => s.setSelectedTrack);
   const { assignPlugin, removeTrackPlugin } = usePluginActions();
@@ -47,6 +54,11 @@ export const TrackHeader = memo(function TrackHeader({
   const [showPluginMenu, setShowPluginMenu] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const volumeChanged = useCallback((a: Track, b: Track) => a.volume !== b.volume, []);
+  const panChanged = useCallback((a: Track, b: Track) => a.pan !== b.pan, []);
+  const volumeGesture = useGestureSnapshot(track.id, "Set Track Volume", volumeChanged);
+  const panGesture = useGestureSnapshot(track.id, "Set Track Pan", panChanged);
 
   const isSelected = selectedTrackId === track.id;
 
@@ -71,33 +83,33 @@ export const TrackHeader = memo(function TrackHeader({
   const handleMute = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      toggleMute(track.id);
+      executeCommand(new ToggleTrackMuteCommand(track.id));
     },
-    [toggleMute, track.id],
+    [executeCommand, track.id],
   );
 
   const handleSolo = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      toggleSolo(track.id);
+      executeCommand(new ToggleTrackSoloCommand(track.id));
     },
-    [toggleSolo, track.id],
+    [executeCommand, track.id],
   );
 
   const handleArm = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      toggleArm(track.id);
+      executeCommand(new ToggleTrackArmCommand(track.id));
     },
-    [toggleArm, track.id],
+    [executeCommand, track.id],
   );
 
   const handleRemove = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      removeTrack(track.id);
+      executeCommand(new DeleteTrackCommand(track.id));
     },
-    [removeTrack, track.id],
+    [executeCommand, track.id],
   );
 
   const handlePluginClick = useCallback(
@@ -156,7 +168,6 @@ export const TrackHeader = memo(function TrackHeader({
       ? "-inf"
       : `${volDb >= 0 ? "+" : ""}${volDb.toFixed(1)}`;
 
-  // Pan display
   const panLabel =
     track.pan === 0
       ? "C"
@@ -199,7 +210,9 @@ export const TrackHeader = memo(function TrackHeader({
               onClick={(e) => e.stopPropagation()}
               onBlur={(e) => {
                 const v = e.target.value.trim();
-                if (v) renameTrack(track.id, v);
+                if (v && v !== track.name) {
+                  executeCommand(new RenameTrackCommand(track.id, v));
+                }
                 setEditingName(false);
               }}
               onKeyDown={(e) => {
@@ -347,11 +360,15 @@ export const TrackHeader = memo(function TrackHeader({
                 step={0.5}
                 value={Math.max(VOL_DB_MIN, volDb)}
                 onChange={handleVolumeChange}
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  setTrackVolume(track.id, dbToVolume(0));
-                }}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={volumeGesture.begin}
+              onPointerUp={volumeGesture.commit}
+              onBlur={volumeGesture.commit}
+              onFocus={volumeGesture.begin}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                executeCommand(new SetTrackVolumeCommand(track.id, dbToVolume(0)));
+              }}
                 className="track-slider relative w-full h-full z-10"
                 title={`Volume: ${volLabel} dB`}
               />
@@ -375,11 +392,15 @@ export const TrackHeader = memo(function TrackHeader({
                 step={0.01}
                 value={track.pan}
                 onChange={handlePanChange}
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  setTrackPan(track.id, 0);
-                }}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={panGesture.begin}
+              onPointerUp={panGesture.commit}
+              onBlur={panGesture.commit}
+              onFocus={panGesture.begin}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                executeCommand(new SetTrackPanCommand(track.id, 0));
+              }}
                 className="track-slider relative w-full h-full z-10"
                 title={`Pan: ${panLabel}`}
               />
