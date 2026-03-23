@@ -8,8 +8,9 @@ import { BiquadFilter, type FilterMode } from "../dsp/filter";
 const MAX_VOICES = 12;
 const RING_SIZE = 4096;
 const WAVEFORM_SEND_INTERVAL = 6; // ~16ms at 128 samples/block
+const BLOCK_SIZE = 128; // standard AudioWorklet block size
 
-// --- Types ---
+// --- Types (duplicated from audio/types.ts — worklets are bundled separately) ---
 interface OscConfig {
   shape: Shape;
   octave: number;
@@ -17,9 +18,25 @@ interface OscConfig {
   level: number;
 }
 
-interface WorkletMessage {
-  type: string;
-  [key: string]: unknown;
+type WorkletMessage =
+  | { type: "noteOn"; midi: number; velocity: number; time?: number }
+  | { type: "noteOff"; midi: number; time?: number }
+  | {
+      type: "setEnvelope";
+      attack: number;
+      decay: number;
+      sustain: number;
+      release: number;
+    }
+  | { type: "setFilter"; mode: FilterMode; cutoff: number; q: number }
+  | { type: "setOscConfigs"; configs: OscConfig[] }
+  | { type: "setVolume"; value: number };
+
+interface PendingNoteEvent {
+  time: number;
+  type: "noteOn" | "noteOff";
+  midi: number;
+  velocity: number;
 }
 
 // --- MIDI util ---
@@ -33,6 +50,9 @@ class Voice {
   env: RealtimeEnvelope;
   private oscs: { shape: Shape; phase: number; phaseInc: number }[];
   private levels: number[];
+  // Preallocated scratch buffers — reused every render call
+  private _phases: Float32Array;
+  private _oscOut: Float32Array;
 
   constructor(
     midi: number,
@@ -54,17 +74,20 @@ class Voice {
       this.oscs.push({ shape: cfg.shape, phase: 0.0, phaseInc: freq / sr });
       this.levels.push(cfg.level);
     }
+
+    this._phases = new Float32Array(BLOCK_SIZE);
+    this._oscOut = new Float32Array(BLOCK_SIZE);
   }
 
   get active(): boolean {
     return this.env.active;
   }
 
-  render(n: number): Float32Array {
+  /** Render this voice and add into the target buffer (+=). */
+  renderInto(target: Float32Array, n: number): void {
     const envBuf = this.env.process(n);
-    const buf = new Float32Array(n);
-    const phases = new Float32Array(n);
-    const oscOut = new Float32Array(n);
+    const phases = this._phases;
+    const oscOut = this._oscOut;
 
     for (let oi = 0; oi < this.oscs.length; oi++) {
       const osc = this.oscs[oi]!;
@@ -79,18 +102,11 @@ class Voice {
       // Render waveform
       renderShape(oscOut, phases, osc.shape);
 
-      // Accumulate
+      // Accumulate into target with envelope
       for (let i = 0; i < n; i++) {
-        buf[i] = buf[i]! + oscOut[i]! * level;
+        target[i]! += oscOut[i]! * level * envBuf[i]!;
       }
     }
-
-    // Apply envelope
-    for (let i = 0; i < n; i++) {
-      buf[i] = buf[i]! * envBuf[i]!;
-    }
-
-    return buf;
   }
 }
 
@@ -103,9 +119,13 @@ class PolySynth {
   sustain = 0.7;
   release = 0.3;
   oscConfigs: OscConfig[] = [{ shape: "saw", octave: 0, fine: 0, level: 1.0 }];
+  // Preallocated render buffer
+  private _renderBuf: Float32Array;
+  private _deadList: number[] = [];
 
   constructor(sampleRate: number) {
     this.sr = sampleRate;
+    this._renderBuf = new Float32Array(BLOCK_SIZE);
   }
 
   noteOn(midi: number): void {
@@ -158,15 +178,16 @@ class PolySynth {
   }
 
   render(nFrames: number): Float32Array {
-    const buf = new Float32Array(nFrames);
-    const dead: number[] = [];
+    const buf = this._renderBuf;
+    // Zero the buffer
+    buf.fill(0, 0, nFrames);
+
+    const dead = this._deadList;
+    dead.length = 0;
 
     for (const [midi, voice] of this.voices) {
       if (voice.active) {
-        const voiceBuf = voice.render(nFrames);
-        for (let i = 0; i < nFrames; i++) {
-          buf[i] = buf[i]! + voiceBuf[i]!;
-        }
+        voice.renderInto(buf, nFrames);
       } else {
         dead.push(midi);
       }
@@ -189,6 +210,8 @@ class SynthProcessor extends AudioWorkletProcessor {
   private ringPos: number;
   private blockCount: number;
   private peakSinceSend: number;
+  // Pending note events sorted by time, for block-accurate scheduling
+  private pendingEvents: PendingNoteEvent[] = [];
 
   constructor() {
     super();
@@ -208,21 +231,37 @@ class SynthProcessor extends AudioWorkletProcessor {
   private handleMessage(msg: WorkletMessage): void {
     switch (msg.type) {
       case "noteOn":
-        this.synth.noteOn(msg.midi as number);
+        if (msg.time !== undefined && msg.time > currentTime) {
+          this.insertPendingEvent({
+            time: msg.time,
+            type: "noteOn",
+            midi: msg.midi,
+            velocity: msg.velocity,
+          });
+        } else {
+          this.synth.noteOn(msg.midi);
+        }
         break;
       case "noteOff":
-        this.synth.noteOff(msg.midi as number);
+        if (msg.time !== undefined && msg.time > currentTime) {
+          this.insertPendingEvent({
+            time: msg.time,
+            type: "noteOff",
+            midi: msg.midi,
+            velocity: 0,
+          });
+        } else {
+          this.synth.noteOff(msg.midi);
+        }
         break;
       case "setEnvelope":
-        this.synth.attack = msg.attack as number;
-        this.synth.decay = msg.decay as number;
-        this.synth.sustain = msg.sustain as number;
-        this.synth.release = msg.release as number;
+        this.synth.attack = msg.attack;
+        this.synth.decay = msg.decay;
+        this.synth.sustain = msg.sustain;
+        this.synth.release = msg.release;
         break;
       case "setFilter": {
-        const mode = msg.mode as FilterMode;
-        const cutoff = msg.cutoff as number;
-        const q = msg.q as number;
+        const { mode, cutoff, q } = msg;
         if (mode === "off") {
           this.filter.setOff();
         } else if (mode === "lp") {
@@ -235,28 +274,63 @@ class SynthProcessor extends AudioWorkletProcessor {
         break;
       }
       case "setOscConfigs":
-        this.synth.oscConfigs = msg.configs as OscConfig[];
+        this.synth.oscConfigs = msg.configs;
         break;
       case "setVolume":
-        this.masterVolume = msg.value as number;
+        this.masterVolume = msg.value;
         break;
+    }
+  }
+
+  /** Insert a pending event in sorted order by time. */
+  private insertPendingEvent(event: PendingNoteEvent): void {
+    let i = this.pendingEvents.length;
+    while (i > 0 && this.pendingEvents[i - 1]!.time > event.time) {
+      i--;
+    }
+    this.pendingEvents.splice(i, 0, event);
+  }
+
+  /** Drain pending events that fall within this block's time window. */
+  private drainPendingEvents(): void {
+    const blockEndTime = currentTime + BLOCK_SIZE / sampleRate;
+    let i = 0;
+    while (i < this.pendingEvents.length) {
+      const event = this.pendingEvents[i]!;
+      if (event.time <= blockEndTime) {
+        if (event.type === "noteOn") {
+          this.synth.noteOn(event.midi);
+        } else {
+          this.synth.noteOff(event.midi);
+        }
+        i++;
+      } else {
+        break; // Events are sorted — no more to drain
+      }
+    }
+    if (i > 0) {
+      this.pendingEvents.splice(0, i);
     }
   }
 
   process(
     _inputs: Float32Array[][],
     outputs: Float32Array[][],
-    _parameters: Record<string, Float32Array>,
+    parameters: Record<string, Float32Array>,
   ): boolean {
+    void parameters;
     const output = outputs[0]?.[0];
     if (!output) return true;
 
     const nFrames = output.length;
 
-    // Render synth
+    // Process any pending timed events that fall within this block
+    this.drainPendingEvents();
+
+    // Render synth (returns preallocated buffer — use before next render call)
     let buf = this.synth.render(nFrames);
 
-    // Apply filter
+    // Apply filter (processes in-place)
     buf = this.filter.process(buf);
 
     // Apply master volume and clip, track peak
@@ -281,31 +355,31 @@ class SynthProcessor extends AudioWorkletProcessor {
     }
     this.ringPos = (pos + n) % RING_SIZE;
 
-    // Periodically send waveform + active notes to main thread
+    // Periodically send batched update to main thread
     this.blockCount++;
     if (this.blockCount >= WAVEFORM_SEND_INTERVAL) {
       this.blockCount = 0;
 
-      // Send waveform (copy the ring in chronological order)
+      // Copy the ring in chronological order
       pos = this.ringPos;
       const waveform = new Float32Array(RING_SIZE);
       waveform.set(this.ring.subarray(pos), 0);
       waveform.set(this.ring.subarray(0, pos), RING_SIZE - pos);
+
+      // Send level
+      const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
+      this.peakSinceSend = 0;
+
+      // Single batched message with transferable waveform buffer
       this.port.postMessage(
-        { type: "waveform", data: waveform },
+        {
+          type: "update",
+          waveform,
+          notes: this.synth.activeNotes(),
+          db,
+        },
         [waveform.buffer],
       );
-
-      // Send active notes
-      this.port.postMessage({
-        type: "activeNotes",
-        notes: this.synth.activeNotes(),
-      });
-
-      // Send level and reset peak tracker
-      const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
-      this.port.postMessage({ type: "level", db });
-      this.peakSinceSend = 0;
     }
 
     return true;

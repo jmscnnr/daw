@@ -41,6 +41,7 @@
       this.sustain = sustain;
       this.level = 0;
       this.state = "off";
+      this._buf = new Float32Array(128);
     }
     noteOn() {
       this.state = "attack";
@@ -54,7 +55,10 @@
       return this.state !== "off";
     }
     process(n) {
-      const out = new Float32Array(n);
+      if (this._buf.length < n) {
+        this._buf = new Float32Array(n);
+      }
+      const out = this._buf;
       let pos = 0;
       while (pos < n) {
         const remaining = n - pos;
@@ -180,15 +184,15 @@
       this.a1 = -2 * cosW0 / a0;
       this.a2 = (1 - alpha) / a0;
     }
+    /** Process the buffer in-place and return it. */
     process(x) {
       if (!this.active) return x;
-      const y = new Float32Array(x.length);
       const { b0, b1, b2, a1, a2 } = this;
       let { x1, x2, y1, y2 } = this;
       for (let i = 0; i < x.length; i++) {
         const x0 = x[i];
         const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-        y[i] = y0;
+        x[i] = y0;
         x2 = x1;
         x1 = x0;
         y2 = y1;
@@ -198,7 +202,7 @@
       this.x2 = x2;
       this.y1 = y1;
       this.y2 = y2;
-      return y;
+      return x;
     }
   };
 
@@ -206,6 +210,7 @@
   var MAX_VOICES = 12;
   var RING_SIZE = 4096;
   var WAVEFORM_SEND_INTERVAL = 6;
+  var BLOCK_SIZE = 128;
   function midiToFreq(midi) {
     return 440 * 2 ** ((midi - 69) / 12);
   }
@@ -221,15 +226,17 @@
         this.oscs.push({ shape: cfg.shape, phase: 0, phaseInc: freq / sr });
         this.levels.push(cfg.level);
       }
+      this._phases = new Float32Array(BLOCK_SIZE);
+      this._oscOut = new Float32Array(BLOCK_SIZE);
     }
     get active() {
       return this.env.active;
     }
-    render(n) {
+    /** Render this voice and add into the target buffer (+=). */
+    renderInto(target, n) {
       const envBuf = this.env.process(n);
-      const buf = new Float32Array(n);
-      const phases = new Float32Array(n);
-      const oscOut = new Float32Array(n);
+      const phases = this._phases;
+      const oscOut = this._oscOut;
       for (let oi = 0; oi < this.oscs.length; oi++) {
         const osc = this.oscs[oi];
         const level = this.levels[oi];
@@ -239,13 +246,9 @@
         osc.phase = (osc.phase + n * osc.phaseInc) % 1;
         renderShape(oscOut, phases, osc.shape);
         for (let i = 0; i < n; i++) {
-          buf[i] = buf[i] + oscOut[i] * level;
+          target[i] += oscOut[i] * level * envBuf[i];
         }
       }
-      for (let i = 0; i < n; i++) {
-        buf[i] = buf[i] * envBuf[i];
-      }
-      return buf;
     }
   };
   var PolySynth = class {
@@ -256,7 +259,9 @@
       this.sustain = 0.7;
       this.release = 0.3;
       this.oscConfigs = [{ shape: "saw", octave: 0, fine: 0, level: 1 }];
+      this._deadList = [];
       this.sr = sampleRate2;
+      this._renderBuf = new Float32Array(BLOCK_SIZE);
     }
     noteOn(midi) {
       if (this.voices.size >= MAX_VOICES && !this.voices.has(midi)) {
@@ -303,14 +308,13 @@
       return notes;
     }
     render(nFrames) {
-      const buf = new Float32Array(nFrames);
-      const dead = [];
+      const buf = this._renderBuf;
+      buf.fill(0, 0, nFrames);
+      const dead = this._deadList;
+      dead.length = 0;
       for (const [midi, voice] of this.voices) {
         if (voice.active) {
-          const voiceBuf = voice.render(nFrames);
-          for (let i = 0; i < nFrames; i++) {
-            buf[i] = buf[i] + voiceBuf[i];
-          }
+          voice.renderInto(buf, nFrames);
         } else {
           dead.push(midi);
         }
@@ -324,6 +328,8 @@
   var SynthProcessor = class extends AudioWorkletProcessor {
     constructor() {
       super();
+      // Pending note events sorted by time, for block-accurate scheduling
+      this.pendingEvents = [];
       this.synth = new PolySynth(sampleRate);
       this.filter = new BiquadFilter();
       this.masterVolume = 0.3;
@@ -338,10 +344,28 @@
     handleMessage(msg) {
       switch (msg.type) {
         case "noteOn":
-          this.synth.noteOn(msg.midi);
+          if (msg.time !== void 0 && msg.time > currentTime) {
+            this.insertPendingEvent({
+              time: msg.time,
+              type: "noteOn",
+              midi: msg.midi,
+              velocity: msg.velocity
+            });
+          } else {
+            this.synth.noteOn(msg.midi);
+          }
           break;
         case "noteOff":
-          this.synth.noteOff(msg.midi);
+          if (msg.time !== void 0 && msg.time > currentTime) {
+            this.insertPendingEvent({
+              time: msg.time,
+              type: "noteOff",
+              midi: msg.midi,
+              velocity: 0
+            });
+          } else {
+            this.synth.noteOff(msg.midi);
+          }
           break;
         case "setEnvelope":
           this.synth.attack = msg.attack;
@@ -350,9 +374,7 @@
           this.synth.release = msg.release;
           break;
         case "setFilter": {
-          const mode = msg.mode;
-          const cutoff = msg.cutoff;
-          const q = msg.q;
+          const { mode, cutoff, q } = msg;
           if (mode === "off") {
             this.filter.setOff();
           } else if (mode === "lp") {
@@ -372,10 +394,41 @@
           break;
       }
     }
-    process(_inputs, outputs, _parameters) {
+    /** Insert a pending event in sorted order by time. */
+    insertPendingEvent(event) {
+      let i = this.pendingEvents.length;
+      while (i > 0 && this.pendingEvents[i - 1].time > event.time) {
+        i--;
+      }
+      this.pendingEvents.splice(i, 0, event);
+    }
+    /** Drain pending events that fall within this block's time window. */
+    drainPendingEvents() {
+      const blockEndTime = currentTime + BLOCK_SIZE / sampleRate;
+      let i = 0;
+      while (i < this.pendingEvents.length) {
+        const event = this.pendingEvents[i];
+        if (event.time <= blockEndTime) {
+          if (event.type === "noteOn") {
+            this.synth.noteOn(event.midi);
+          } else {
+            this.synth.noteOff(event.midi);
+          }
+          i++;
+        } else {
+          break;
+        }
+      }
+      if (i > 0) {
+        this.pendingEvents.splice(0, i);
+      }
+    }
+    process(_inputs, outputs, parameters) {
+      void parameters;
       const output = outputs[0]?.[0];
       if (!output) return true;
       const nFrames = output.length;
+      this.drainPendingEvents();
       let buf = this.synth.render(nFrames);
       buf = this.filter.process(buf);
       let peak = 0;
@@ -403,17 +456,17 @@
         const waveform = new Float32Array(RING_SIZE);
         waveform.set(this.ring.subarray(pos), 0);
         waveform.set(this.ring.subarray(0, pos), RING_SIZE - pos);
+        const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
+        this.peakSinceSend = 0;
         this.port.postMessage(
-          { type: "waveform", data: waveform },
+          {
+            type: "update",
+            waveform,
+            notes: this.synth.activeNotes(),
+            db
+          },
           [waveform.buffer]
         );
-        this.port.postMessage({
-          type: "activeNotes",
-          notes: this.synth.activeNotes()
-        });
-        const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
-        this.port.postMessage({ type: "level", db });
-        this.peakSinceSend = 0;
       }
       return true;
     }
