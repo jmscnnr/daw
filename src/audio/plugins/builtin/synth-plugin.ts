@@ -118,6 +118,16 @@ class SynthPluginInstance implements PluginInstance {
 
   setState(state: Record<string, unknown>): void {
     Object.assign(this.params, state);
+    // Also apply to the running engine
+    this.engine.setEnvelope(
+      this.params.attack,
+      this.params.decay,
+      this.params.sustain,
+      this.params.release,
+    );
+    this.engine.setFilter(this.params.filterMode, this.params.filterCutoff, this.params.filterQ);
+    this.engine.setVolume(this.params.volume);
+    this.engine.setOscConfigs(this.params.oscConfigs);
   }
 
   onMidiEvent(event: MidiEvent): void {

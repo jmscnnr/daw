@@ -23,6 +23,8 @@ export function useDAWEngine(enabled: boolean) {
   const [handle, setHandle] = useState<DAWEngineHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const handleRef = useRef<DAWEngineHandle | null>(null);
+  const [, setPluginVersion] = useState(0);
+  const bumpPluginVersion = () => setPluginVersion((v) => v + 1);
 
   // Initialize audio engine
   useEffect(() => {
@@ -90,8 +92,13 @@ export function useDAWEngine(enabled: boolean) {
           if (chain) {
             void createPluginInstance(slot.pluginId, audioEngine.context).then(
               (instance) => {
+                // Restore saved state from the project
+                if (slot.state && Object.keys(slot.state).length > 0) {
+                  instance.setState(slot.state);
+                }
                 pluginInstances.set(slot.id, instance);
                 chain.addPlugin(instance);
+                bumpPluginVersion();
               },
             );
           }
@@ -131,6 +138,7 @@ export function useDAWEngine(enabled: boolean) {
             ).then((instance) => {
               pluginInstances.set(slot.id, instance);
               chain.addPlugin(instance);
+              bumpPluginVersion();
             });
           }
         }
@@ -279,6 +287,34 @@ export function useDAWEngine(enabled: boolean) {
 
     raf = requestAnimationFrame(update);
     return () => cancelAnimationFrame(raf);
+  }, [handle]);
+
+  // Persist plugin instance state into project slot state (for save/load)
+  useEffect(() => {
+    if (!handle) return;
+    const { pluginInstances } = handle;
+
+    const interval = setInterval(() => {
+      const store = useProjectStore.getState();
+      for (const track of store.project.tracks) {
+        for (const slot of track.pluginChain) {
+          const instance = pluginInstances.get(slot.id);
+          if (instance) {
+            const instanceState = instance.getState();
+            // Only update if state actually changed
+            const current = slot.state;
+            const changed = Object.keys(instanceState).some(
+              (k) => JSON.stringify(instanceState[k]) !== JSON.stringify(current[k]),
+            );
+            if (changed) {
+              store.updatePluginSlotState(track.id, slot.id, instanceState);
+            }
+          }
+        }
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
   }, [handle]);
 
   // Get plugin instance for a given track (first plugin slot)
