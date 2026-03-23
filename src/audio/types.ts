@@ -9,8 +9,8 @@ export interface OscConfig {
 
 // Main thread → Worklet
 export type WorkletMessage =
-  | { type: "noteOn"; midi: number; velocity: number }
-  | { type: "noteOff"; midi: number }
+  | { type: "noteOn"; midi: number; velocity: number; time?: number }
+  | { type: "noteOff"; midi: number; time?: number }
   | {
       type: "setEnvelope";
       attack: number;
@@ -26,4 +26,5 @@ export type WorkletMessage =
 export type WorkletResponse =
   | { type: "waveform"; data: Float32Array }
   | { type: "activeNotes"; notes: number[] }
-  | { type: "level"; db: number };
+  | { type: "level"; db: number }
+  | { type: "update"; waveform: Float32Array; notes: number[]; db: number };

@@ -3,12 +3,22 @@ export interface TimeSignature {
   denominator: number;
 }
 
+export interface AudioBufferRef {
+  id: string;
+  name: string;
+  url?: string;
+  sampleRate: number;
+  channels: number;
+  length: number; // in samples
+}
+
 export interface Project {
   id: string;
   name: string;
   bpm: number;
   timeSignature: TimeSignature;
   tracks: Track[];
+  audioBuffers: AudioBufferRef[];
   masterVolume: number;
   masterPan: number;
   createdAt: number;
@@ -50,7 +60,13 @@ export interface Clip {
 
 export type ClipContent =
   | { type: "midi"; notes: MidiNote[] }
-  | { type: "audio"; placeholder: true };
+  | {
+      type: "audio";
+      bufferId: string;
+      offsetSamples: number;
+      durationSamples: number;
+      sampleRate: number;
+    };
 
 export interface MidiNote {
   note: number;
