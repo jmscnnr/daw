@@ -14,6 +14,15 @@ const MAX_NOTE = 96; // C7
 const TOTAL_KEYS = MAX_NOTE - MIN_NOTE;
 const HEADER_HEIGHT = 24;
 
+const GRID_DIVISIONS = [
+  { label: "1/4", ticks: PPQ },
+  { label: "1/8", ticks: PPQ / 2 },
+  { label: "1/8T", ticks: PPQ / 3 },
+  { label: "1/16", ticks: PPQ / 4 },
+  { label: "1/16T", ticks: PPQ / 6 },
+  { label: "1/32", ticks: PPQ / 8 },
+] as const;
+
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function isBlackKey(note: number): boolean {
@@ -38,6 +47,10 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
   const keysContainerRef = useRef<HTMLDivElement>(null);
   const [scrollY, setScrollY] = useState((TOTAL_KEYS * NOTE_HEIGHT) / 2 - 150);
   const [zoom, setZoom] = useState(80); // pixels per beat
+  const [gridDivisionIndex, setGridDivisionIndex] = useState(3); // default 1/16
+  const [quantizeStrength, setQuantizeStrength] = useState(100);
+  const [quantizeSwing, setQuantizeSwing] = useState(0);
+  const [showQuantize, setShowQuantize] = useState(false);
   const dragRef = useRef<{
     type: "draw" | "move" | "resize";
     noteIndex?: number;
@@ -50,6 +63,7 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
   const addNote = useProjectStore((s) => s.addNoteToClip);
   const removeNote = useProjectStore((s) => s.removeNoteFromClip);
   const updateNote = useProjectStore((s) => s.updateNoteInClip);
+  const quantizeNotes = useProjectStore((s) => s.quantizeClipNotes);
   const { sendMidiToTrack } = usePluginActions();
   const previewNoteRef = useRef<number | null>(null);
   const gridPreviewNoteRef = useRef<number | null>(null);
@@ -75,7 +89,7 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
   }, [trackId, sendMidiToTrack]);
 
   const pixelsPerTick = zoom / PPQ;
-  const quantizeTicks = PPQ / 4; // 16th note
+  const quantizeTicks = GRID_DIVISIONS[gridDivisionIndex]!.ticks;
 
   const snapToGrid = useCallback(
     (tick: number) => Math.round(tick / quantizeTicks) * quantizeTicks,
@@ -627,9 +641,30 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
         <span className="text-xs text-synth-muted">
           Editing: <span className="text-synth-text">{clip.name}</span>
         </span>
-        <span className="text-[10px] text-synth-muted ml-2">
-          Click to draw notes · Right-click to delete · Drag edges to resize
-        </span>
+        <div className="flex items-center gap-1 ml-2">
+          <span className="text-[10px] text-synth-muted">Grid:</span>
+          <select
+            value={gridDivisionIndex}
+            onChange={(e) => setGridDivisionIndex(Number(e.target.value))}
+            className="h-5 rounded border border-synth-border bg-synth-surface px-1 text-[10px] text-synth-text"
+          >
+            {GRID_DIVISIONS.map((d, i) => (
+              <option key={d.label} value={i}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={() => setShowQuantize((v) => !v)}
+          className={`rounded border px-2 py-0.5 text-[10px] ${
+            showQuantize
+              ? "border-synth-accent bg-synth-accent/20 text-synth-accent"
+              : "border-synth-border bg-synth-surface text-synth-muted hover:text-synth-text"
+          }`}
+        >
+          Quantize
+        </button>
         <div className="flex items-center gap-1 ml-auto">
           <span className="text-[10px] text-synth-muted">Zoom:</span>
           <input
@@ -648,6 +683,50 @@ export function PianoRoll({ clip, trackId }: PianoRollProps) {
           Close
         </button>
       </div>
+
+      {/* Quantize panel */}
+      {showQuantize && (
+        <div className="flex items-center gap-4 border-b border-synth-border bg-synth-surface/50 px-3 py-1.5 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-synth-muted">Strength:</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={quantizeStrength}
+              onChange={(e) => setQuantizeStrength(Number(e.target.value))}
+              className="h-1 w-20"
+            />
+            <span className="text-[10px] text-synth-text w-7 text-right">{quantizeStrength}%</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-synth-muted">Swing:</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={quantizeSwing}
+              onChange={(e) => setQuantizeSwing(Number(e.target.value))}
+              className="h-1 w-20"
+            />
+            <span className="text-[10px] text-synth-text w-7 text-right">{quantizeSwing}%</span>
+          </div>
+          <button
+            onClick={() =>
+              quantizeNotes(
+                trackId,
+                clip.id,
+                quantizeTicks,
+                quantizeStrength / 100,
+                quantizeSwing / 100,
+              )
+            }
+            className="rounded border border-synth-accent bg-synth-accent/20 px-3 py-0.5 text-[10px] text-synth-accent hover:bg-synth-accent/30"
+          >
+            Apply
+          </button>
+        </div>
+      )}
 
       {/* Piano roll area */}
       <div className="flex flex-1 overflow-hidden">

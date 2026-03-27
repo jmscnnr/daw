@@ -80,6 +80,15 @@ interface ProjectState {
   resizeClip(trackId: string, clipId: string, durationTicks: number): void;
   splitClip(trackId: string, clipId: string, splitTick: number): string | null;
 
+  // Quantization
+  quantizeClipNotes(
+    trackId: string,
+    clipId: string,
+    divisionTicks: number,
+    strength: number,
+    swing: number,
+  ): void;
+
   // Project metadata
   setProjectName(name: string): void;
   setBPM(bpm: number): void;
@@ -665,6 +674,47 @@ export const useProjectStore = create<ProjectState>()(subscribeWithSelector((set
     );
 
     return rightId;
+  },
+
+  quantizeClipNotes(trackId, clipId, divisionTicks, strength, swing) {
+    set((state) => {
+      const location = state.projectIndex.clipLocationsById[clipId];
+      const trackIndex = state.projectIndex.trackIndicesById[trackId];
+      if (!location || trackIndex === undefined || location.trackId !== trackId) return state;
+
+      return applyProjectMutation(state.project, (tracks) =>
+        cloneTrackAt(tracks, trackIndex, (track) => ({
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId || clip.content.type !== "midi") return clip;
+
+            const quantized = clip.content.notes.map((note) => {
+              // Find the nearest grid line index
+              const gridIndex = Math.round(note.startTick / divisionTicks);
+              let gridTick = gridIndex * divisionTicks;
+
+              // Apply swing: shift every other grid line forward
+              // Swing of 0 = no shift, swing of 1 = shift by full division
+              if (gridIndex % 2 === 1 && swing > 0) {
+                gridTick += Math.round(divisionTicks * swing * 0.5);
+              }
+
+              // Apply strength: lerp between original position and grid position
+              const quantizedStart = Math.round(
+                note.startTick + (gridTick - note.startTick) * strength,
+              );
+
+              return { ...note, startTick: Math.max(0, quantizedStart) };
+            });
+
+            return {
+              ...clip,
+              content: { ...clip.content, notes: quantized },
+            };
+          }),
+        })),
+      );
+    });
   },
 
   setProjectName(name) {
