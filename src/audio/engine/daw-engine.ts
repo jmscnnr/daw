@@ -42,6 +42,11 @@ export class DAWEngine {
     this.transport.setMidiDispatch((trackId, event, _sampleOffset) => {
       this.sendMidiToTrack(trackId, event);
     });
+
+    // Release all hanging notes when transport stops/pauses
+    this.transport.setStopCallback(() => {
+      this.allNotesOff();
+    });
   }
 
   static async create(): Promise<DAWEngine> {
@@ -144,6 +149,22 @@ export class DAWEngine {
       if (plugin.descriptor.type === "instrument" && plugin.processMidi) {
         plugin.processMidi([{ message: msg, tick: 0 }]);
         return;
+      }
+    }
+  }
+
+  /**
+   * Send allNotesOff to all instrument plugins across all tracks.
+   * Called on transport stop/pause/seek to prevent hanging notes.
+   */
+  allNotesOff(): void {
+    for (const plugin of this.plugins.values()) {
+      if (plugin.descriptor.type === "instrument") {
+        // Use the SynthEngine's allNotesOff if available
+        const instance = plugin as { getEngine?: () => { allNotesOff(): void } };
+        if (typeof instance.getEngine === "function") {
+          instance.getEngine().allNotesOff();
+        }
       }
     }
   }

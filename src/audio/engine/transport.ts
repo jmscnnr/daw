@@ -40,6 +40,7 @@ export class Transport {
   private getTrackInfos: () => TransportTrackInfo[] = () => [];
   private dispatchMidi: TransportMidiDispatchFn = () => {};
   private onPositionUpdate: ((tick: number) => void) | null = null;
+  private onStop: (() => void) | null = null;
 
   constructor(ctx: IAudioContext) {
     this.ctx = ctx;
@@ -109,17 +110,21 @@ export class Transport {
     this.playing = false;
     this.currentTick = 0;
     this.clockNode?.port.postMessage({ type: "stop" });
+    this.onStop?.();
     this.onPositionUpdate?.(0);
   }
 
   pause(): void {
     this.playing = false;
     this.clockNode?.port.postMessage({ type: "pause" });
+    this.onStop?.();
   }
 
   seek(tick: number): void {
     this.currentTick = tick;
+    // Release hanging notes when seeking during playback
     if (this.playing) {
+      this.onStop?.();
       this.sendEventsToWorklet();
     }
     this.clockNode?.port.postMessage({ type: "seek", tick });
@@ -164,6 +169,10 @@ export class Transport {
 
   setPositionCallback(fn: (tick: number) => void): void {
     this.onPositionUpdate = fn;
+  }
+
+  setStopCallback(fn: () => void): void {
+    this.onStop = fn;
   }
 
   // --- Internal ---

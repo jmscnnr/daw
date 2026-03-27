@@ -134,6 +134,10 @@ export class SynthEngine {
     this.send({ type: "noteOff", midi, time });
   }
 
+  allNotesOff(): void {
+    this.send({ type: "allNotesOff" });
+  }
+
   setEnvelope(
     attack: number,
     decay: number,

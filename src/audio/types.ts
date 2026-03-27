@@ -11,6 +11,7 @@ export interface OscConfig {
 export type WorkletMessage =
   | { type: "noteOn"; midi: number; velocity: number; time?: number }
   | { type: "noteOff"; midi: number; time?: number }
+  | { type: "allNotesOff" }
   | {
       type: "setEnvelope";
       attack: number;
