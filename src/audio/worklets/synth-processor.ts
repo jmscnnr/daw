@@ -9,6 +9,7 @@ const MAX_VOICES = 12;
 const RING_SIZE = 4096;
 const WAVEFORM_SEND_INTERVAL = 6; // ~16ms at 128 samples/block
 const BLOCK_SIZE = 128; // standard AudioWorklet block size
+const MAX_PENDING_EVENTS = 256; // cap pending events to prevent unbounded growth
 
 // --- Types (duplicated from audio/types.ts — worklets are bundled separately) ---
 interface OscConfig {
@@ -21,6 +22,7 @@ interface OscConfig {
 type WorkletMessage =
   | { type: "noteOn"; midi: number; velocity: number; time?: number }
   | { type: "noteOff"; midi: number; time?: number }
+  | { type: "allNotesOff" }
   | {
       type: "setEnvelope";
       attack: number;
@@ -147,6 +149,8 @@ class Voice {
 
     if (!this.env.active) {
       this._active = false;
+      // Reset filter state so stale denormals don't affect next trigger
+      this.filter.resetState();
     }
   }
 }
@@ -186,6 +190,8 @@ class PolySynth {
   // Preallocated render buffer
   private _renderBuf: Float32Array;
   private _deadList: number[] = [];
+  // Preallocated active-notes array (avoids allocation every ~16ms)
+  private _notesBuf: number[] = [];
 
   constructor(sampleRate: number) {
     this.sr = sampleRate;
@@ -268,6 +274,13 @@ class PolySynth {
     }
   }
 
+  /** Release all active voices immediately — prevents hanging notes. */
+  allNotesOff(): void {
+    for (const voice of this.activeVoices.values()) {
+      voice.env.noteOff();
+    }
+  }
+
   /** Propagate osc config changes to all active voices. */
   updateActiveOscConfigs(configs: OscConfig[]): void {
     for (const voice of this.activeVoices.values()) {
@@ -283,7 +296,8 @@ class PolySynth {
   }
 
   activeNotes(): number[] {
-    const notes: number[] = [];
+    const notes = this._notesBuf;
+    notes.length = 0;
     for (const [m, v] of this.activeVoices) {
       if (v.active) notes.push(m);
     }
@@ -326,6 +340,8 @@ class SynthProcessor extends AudioWorkletProcessor {
   private peakSinceSend: number;
   // Pending note events sorted by time, for block-accurate scheduling
   private pendingEvents: PendingNoteEvent[] = [];
+  // Preallocated waveform buffer for display updates (avoids allocation every ~16ms)
+  private _waveformBuf: Float32Array;
 
   constructor() {
     super();
@@ -336,6 +352,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     this.ringPos = 0;
     this.blockCount = 0;
     this.peakSinceSend = 0;
+    this._waveformBuf = new Float32Array(WAVEFORM_DISPLAY_SIZE);
 
     this.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
       this.handleMessage(event.data);
@@ -367,6 +384,10 @@ class SynthProcessor extends AudioWorkletProcessor {
         } else {
           this.synth.noteOff(msg.midi);
         }
+        break;
+      case "allNotesOff":
+        this.synth.allNotesOff();
+        this.pendingEvents.length = 0;
         break;
       case "setEnvelope":
         this.synth.attack = msg.attack;
@@ -402,6 +423,11 @@ class SynthProcessor extends AudioWorkletProcessor {
 
   /** Insert a pending event in sorted order by time. */
   private insertPendingEvent(event: PendingNoteEvent): void {
+    // Drop oldest events if the queue is full (prevents unbounded growth
+    // from rapid playback flooding the queue)
+    if (this.pendingEvents.length >= MAX_PENDING_EVENTS) {
+      this.pendingEvents.splice(0, this.pendingEvents.length - MAX_PENDING_EVENTS + 1);
+    }
     let i = this.pendingEvents.length;
     while (i > 0 && this.pendingEvents[i - 1]!.time > event.time) {
       i--;
@@ -454,12 +480,22 @@ class SynthProcessor extends AudioWorkletProcessor {
 
     // Apply smoothed master volume and tanh soft saturation, track peak
     let peak = 0;
+    let hasNaN = false;
     for (let i = 0; i < nFrames; i++) {
       const vol = this.smoothVolume.next();
-      const sample = buf[i]! * vol;
+      let sample = buf[i]! * vol;
+      // Guard against NaN/Infinity from filter or voice rendering
+      if (!isFinite(sample)) {
+        sample = 0;
+        hasNaN = true;
+      }
       outL[i] = Math.tanh(sample);
       const abs = Math.abs(outL[i]!);
       if (abs > peak) peak = abs;
+    }
+    // If we detected bad values, reset filter state to recover
+    if (hasNaN) {
+      this.filter.resetState();
     }
     if (peak > this.peakSinceSend) this.peakSinceSend = peak;
 
@@ -485,7 +521,7 @@ class SynthProcessor extends AudioWorkletProcessor {
 
       // Downsample the ring for display — 256 samples is plenty for visualization
       pos = this.ringPos;
-      const waveform = new Float32Array(WAVEFORM_DISPLAY_SIZE);
+      const waveform = this._waveformBuf;
       const step = RING_SIZE / WAVEFORM_DISPLAY_SIZE;
       for (let i = 0; i < WAVEFORM_DISPLAY_SIZE; i++) {
         const srcIdx = (pos + Math.floor(i * step)) % RING_SIZE;
@@ -496,15 +532,17 @@ class SynthProcessor extends AudioWorkletProcessor {
       const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
       this.peakSinceSend = 0;
 
-      // Single batched message with transferable waveform buffer
+      // Copy waveform for transfer (avoids allocating in the hot path —
+      // we reuse _waveformBuf and only allocate the transfer copy here)
+      const transfer = new Float32Array(waveform);
       this.port.postMessage(
         {
           type: "update",
-          waveform,
+          waveform: transfer,
           notes: this.synth.activeNotes(),
           db,
         },
-        [waveform.buffer],
+        [transfer.buffer],
       );
     }
 

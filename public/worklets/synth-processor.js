@@ -176,7 +176,7 @@
   };
 
   // src/audio/dsp/filter.ts
-  var BiquadFilter = class {
+  var BiquadFilter = class _BiquadFilter {
     constructor() {
       this.x1 = 0;
       this.x2 = 0;
@@ -230,6 +230,17 @@
       this.a1 = -2 * cosW0 / a0;
       this.a2 = (1 - alpha) / a0;
     }
+    /** Flush denormals to zero to prevent CPU spikes on near-silent tails. */
+    static flush(v) {
+      return v + 1e-18 - 1e-18;
+    }
+    /** Reset filter state — call when output has gone bad (NaN/Infinity). */
+    resetState() {
+      this.x1 = 0;
+      this.x2 = 0;
+      this.y1 = 0;
+      this.y2 = 0;
+    }
     /** Process the buffer in-place and return it. */
     process(x) {
       if (!this.active) return x;
@@ -244,6 +255,17 @@
         y2 = y1;
         y1 = y0;
       }
+      x1 = _BiquadFilter.flush(x1);
+      x2 = _BiquadFilter.flush(x2);
+      y1 = _BiquadFilter.flush(y1);
+      y2 = _BiquadFilter.flush(y2);
+      if (!isFinite(y1) || !isFinite(y2)) {
+        this.x1 = 0;
+        this.x2 = 0;
+        this.y1 = 0;
+        this.y2 = 0;
+        return x;
+      }
       this.x1 = x1;
       this.x2 = x2;
       this.y1 = y1;
@@ -257,6 +279,7 @@
   var RING_SIZE = 4096;
   var WAVEFORM_SEND_INTERVAL = 6;
   var BLOCK_SIZE = 128;
+  var MAX_PENDING_EVENTS = 256;
   function midiToFreq(midi) {
     return 440 * 2 ** ((midi - 69) / 12);
   }
@@ -330,6 +353,7 @@
       }
       if (!this.env.active) {
         this._active = false;
+        this.filter.resetState();
       }
     }
   };
@@ -356,6 +380,8 @@
       this.release = 0.3;
       this.oscConfigs = [{ shape: "saw", octave: 0, fine: 0, level: 1 }];
       this._deadList = [];
+      // Preallocated active-notes array (avoids allocation every ~16ms)
+      this._notesBuf = [];
       this.sr = sampleRate2;
       this._renderBuf = new Float32Array(BLOCK_SIZE);
       this.pool = Array.from({ length: MAX_VOICES }, () => new Voice(sampleRate2));
@@ -428,6 +454,12 @@
         }
       }
     }
+    /** Release all active voices immediately — prevents hanging notes. */
+    allNotesOff() {
+      for (const voice of this.activeVoices.values()) {
+        voice.env.noteOff();
+      }
+    }
     /** Propagate osc config changes to all active voices. */
     updateActiveOscConfigs(configs) {
       for (const voice of this.activeVoices.values()) {
@@ -441,7 +473,8 @@
       }
     }
     activeNotes() {
-      const notes = [];
+      const notes = this._notesBuf;
+      notes.length = 0;
       for (const [m, v] of this.activeVoices) {
         if (v.active) notes.push(m);
       }
@@ -478,6 +511,7 @@
       this.ringPos = 0;
       this.blockCount = 0;
       this.peakSinceSend = 0;
+      this._waveformBuf = new Float32Array(WAVEFORM_DISPLAY_SIZE);
       this.port.onmessage = (event) => {
         this.handleMessage(event.data);
       };
@@ -507,6 +541,10 @@
           } else {
             this.synth.noteOff(msg.midi);
           }
+          break;
+        case "allNotesOff":
+          this.synth.allNotesOff();
+          this.pendingEvents.length = 0;
           break;
         case "setEnvelope":
           this.synth.attack = msg.attack;
@@ -539,6 +577,9 @@
     }
     /** Insert a pending event in sorted order by time. */
     insertPendingEvent(event) {
+      if (this.pendingEvents.length >= MAX_PENDING_EVENTS) {
+        this.pendingEvents.splice(0, this.pendingEvents.length - MAX_PENDING_EVENTS + 1);
+      }
       let i = this.pendingEvents.length;
       while (i > 0 && this.pendingEvents[i - 1].time > event.time) {
         i--;
@@ -576,12 +617,20 @@
       let buf = this.synth.render(nFrames);
       buf = this.filter.process(buf);
       let peak = 0;
+      let hasNaN = false;
       for (let i = 0; i < nFrames; i++) {
         const vol = this.smoothVolume.next();
-        const sample = buf[i] * vol;
+        let sample = buf[i] * vol;
+        if (!isFinite(sample)) {
+          sample = 0;
+          hasNaN = true;
+        }
         outL[i] = Math.tanh(sample);
         const abs = Math.abs(outL[i]);
         if (abs > peak) peak = abs;
+      }
+      if (hasNaN) {
+        this.filter.resetState();
       }
       if (peak > this.peakSinceSend) this.peakSinceSend = peak;
       if (outR) outR.set(outL);
@@ -599,7 +648,7 @@
       if (this.blockCount >= WAVEFORM_SEND_INTERVAL) {
         this.blockCount = 0;
         pos = this.ringPos;
-        const waveform = new Float32Array(WAVEFORM_DISPLAY_SIZE);
+        const waveform = this._waveformBuf;
         const step = RING_SIZE / WAVEFORM_DISPLAY_SIZE;
         for (let i = 0; i < WAVEFORM_DISPLAY_SIZE; i++) {
           const srcIdx = (pos + Math.floor(i * step)) % RING_SIZE;
@@ -607,14 +656,15 @@
         }
         const db = this.peakSinceSend > 0 ? 20 * Math.log10(this.peakSinceSend) : -Infinity;
         this.peakSinceSend = 0;
+        const transfer = new Float32Array(waveform);
         this.port.postMessage(
           {
             type: "update",
-            waveform,
+            waveform: transfer,
             notes: this.synth.activeNotes(),
             db
           },
-          [waveform.buffer]
+          [transfer.buffer]
         );
       }
       return true;
