@@ -23,6 +23,9 @@ export class DAWEngine {
   /** Plugin instances by slot ID */
   private plugins = new Map<string, PluginInstance>();
 
+  /** Optional callback for live MIDI input (used for recording hardware MIDI) */
+  private midiInputCallback: ((trackId: string, msg: TimedMidiMessage) => void) | null = null;
+
   private constructor(
     ctx: IAudioContext,
     graph: AudioGraph,
@@ -149,12 +152,20 @@ export class DAWEngine {
     const node = this.graph.getNode(trackId);
     if (!node) return;
 
+    // Notify recording callback (for hardware MIDI recording)
+    this.midiInputCallback?.(trackId, msg);
+
     for (const plugin of node.plugins) {
       if (plugin.descriptor.type === "instrument" && plugin.processMidi) {
         plugin.processMidi([msg]);
         return;
       }
     }
+  }
+
+  /** Set a callback that fires whenever live MIDI input arrives on a track via the MIDIBus */
+  setMidiInputCallback(cb: ((trackId: string, msg: TimedMidiMessage) => void) | null): void {
+    this.midiInputCallback = cb;
   }
 
   // --- Dispose ---

@@ -8,6 +8,10 @@ export interface PluginActions {
   removeTrackPlugin: (trackId: string) => void;
   sendMidiToTrack: (trackId: string, event: MidiEvent) => void;
   commitPluginState: (slotId: string, state: Record<string, unknown>) => void;
+  /** Recording-aware note on — records into the active clip and plays sound */
+  noteOn: (midi: number) => void;
+  /** Recording-aware note off — commits the recorded note and stops sound */
+  noteOff: (midi: number) => void;
 }
 
 export const PluginActionsContext = createContext<PluginActions>({
@@ -15,6 +19,8 @@ export const PluginActionsContext = createContext<PluginActions>({
   removeTrackPlugin: () => {},
   sendMidiToTrack: () => {},
   commitPluginState: () => {},
+  noteOn: () => {},
+  noteOff: () => {},
 });
 
 export function usePluginActions(): PluginActions {

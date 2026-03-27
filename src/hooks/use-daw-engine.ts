@@ -71,6 +71,15 @@ export function useDAWEngine(enabled: boolean) {
       return track?.pluginChain.some((slot) => slot.id === slotId) ?? false;
     };
 
+    // Sync MIDIBus focus/armed tracks
+    const syncMidiBusRouting = () => {
+      const focusedTrackId = useUIStore.getState().selectedTrackId;
+      engine.midiBus.setFocusedTrack(focusedTrackId);
+      const { tracks } = useProjectStore.getState().project;
+      const armedIds = new Set(tracks.filter((t) => t.armed).map((t) => t.id));
+      engine.midiBus.setArmedTracks(armedIds);
+    };
+
     // Bootstrap existing tracks
     const initialTracks = useProjectStore.getState().project.tracks;
     for (const track of initialTracks) {
@@ -95,6 +104,7 @@ export function useDAWEngine(enabled: boolean) {
         }
       }
     }
+    syncMidiBusRouting();
 
     const unsub = useProjectStore.subscribe((state, prevState) => {
       const { tracks } = state.project;
@@ -172,9 +182,21 @@ export function useDAWEngine(enabled: boolean) {
       if (state.project.masterPan !== prevState.project.masterPan) {
         engine.graph.setPan(master.id, state.project.masterPan);
       }
+
+      // Sync armed tracks to MIDIBus
+      syncMidiBusRouting();
     });
 
-    return unsub;
+    // Sync selected track (focused) to MIDIBus
+    const unsubUI = useUIStore.subscribe(
+      (s) => s.selectedTrackId,
+      () => syncMidiBusRouting(),
+    );
+
+    return () => {
+      unsub();
+      unsubUI();
+    };
   }, [handle]);
 
   // Sync transport store → transport (worklet-based)
@@ -224,6 +246,13 @@ export function useDAWEngine(enabled: boolean) {
         );
       }
     });
+
+    // Catch-up: if the transport store already says "playing" when this effect
+    // mounts (e.g. user pressed Record before the engine was ready), start now.
+    const currentTransport = useTransportStore.getState();
+    if (currentTransport.state === "playing") {
+      transport.play(currentTransport.positionTicks);
+    }
 
     return () => {
       unsubProject();

@@ -6,6 +6,7 @@ import { FilterPanel } from "./FilterPanel";
 import { VolumePanel } from "./VolumePanel";
 import { OscBankPanel } from "./OscBankPanel";
 import { PianoKeyboard } from "./PianoKeyboard";
+import { usePluginActions } from "@/hooks/use-plugin-actions";
 import type { PluginInstance } from "@/types/plugin";
 import type {
   SynthPluginInstance,
@@ -118,18 +119,20 @@ export function SynthPluginUI({ instance }: SynthPluginUIProps) {
     [updateParams],
   );
 
+  const { noteOn, noteOff } = usePluginActions();
+
   const handleNoteOn = useCallback(
     (midi: number) => {
-      engine.noteOn(midi);
+      noteOn(midi);
     },
-    [engine],
+    [noteOn],
   );
 
   const handleNoteOff = useCallback(
     (midi: number) => {
-      engine.noteOff(midi);
+      noteOff(midi);
     },
-    [engine],
+    [noteOff],
   );
 
   return (

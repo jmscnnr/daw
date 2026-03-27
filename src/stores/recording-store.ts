@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { PPQ } from "@/lib/constants";
 
 interface ActiveRecordNote {
   note: number;
@@ -13,10 +14,16 @@ interface RecordingState {
   recordClipId: string | null;
   /** Absolute tick when recording started */
   recordStartTick: number;
+  /** Wall-clock time (performance.now) when recording started */
+  recordStartTimeMs: number;
+  /** BPM at time of recording start */
+  recordBpm: number;
   /** Notes currently held down (keyed by MIDI note number) */
   activeNotes: Map<number, ActiveRecordNote>;
 
-  startRecording(trackId: string, clipId: string, startTick: number): void;
+  startRecording(trackId: string, clipId: string, startTick: number, bpm: number): void;
+  /** Get current absolute tick based on wall-clock elapsed time */
+  getCurrentTick(): number;
   noteOn(note: number, velocity: number, absoluteTick: number): void;
   /** Returns the completed note info so caller can add it to the clip */
   noteOff(note: number): ActiveRecordNote | null;
@@ -29,15 +36,27 @@ export const useRecordingStore = create<RecordingState>()((set, get) => ({
   recordTrackId: null,
   recordClipId: null,
   recordStartTick: 0,
+  recordStartTimeMs: 0,
+  recordBpm: 120,
   activeNotes: new Map(),
 
-  startRecording(trackId, clipId, startTick) {
+  startRecording(trackId, clipId, startTick, bpm) {
     set({
       recordTrackId: trackId,
       recordClipId: clipId,
       recordStartTick: startTick,
+      recordStartTimeMs: performance.now(),
+      recordBpm: bpm,
       activeNotes: new Map(),
     });
+  },
+
+  getCurrentTick() {
+    const { recordStartTick, recordStartTimeMs, recordBpm } = get();
+    if (recordStartTimeMs === 0) return 0;
+    const elapsedMs = performance.now() - recordStartTimeMs;
+    const elapsedBeats = (elapsedMs / 1000) * (recordBpm / 60);
+    return recordStartTick + Math.round(elapsedBeats * PPQ);
   },
 
   noteOn(note, velocity, absoluteTick) {
@@ -68,6 +87,8 @@ export const useRecordingStore = create<RecordingState>()((set, get) => ({
       recordTrackId: null,
       recordClipId: null,
       recordStartTick: 0,
+      recordStartTimeMs: 0,
+      recordBpm: 120,
       activeNotes: new Map(),
     });
   },
