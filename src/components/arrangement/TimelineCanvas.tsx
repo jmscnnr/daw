@@ -523,10 +523,6 @@ export function TimelineCanvas() {
     if (hit) {
       useUIStore.getState().setSelectedClips([hit.clip.id]);
 
-      // Move transport to click position
-      const snappedClick = snapTick(clickTick);
-      useTransportStore.getState().setPosition(Math.max(0, Math.round(snappedClick)));
-
       // Check if near right edge → resize
       const { horizontalZoom } = useUIStore.getState();
       const pixelsPerTick = horizontalZoom / PPQ;
@@ -559,12 +555,6 @@ export function TimelineCanvas() {
 
     // Clicked empty space → deselect clips
     useUIStore.getState().setSelectedClips([]);
-
-    // Empty lane → scrub playhead
-    dragRef.current = { type: "scrub" };
-    const snapped = snapTick(clickTick);
-    useTransportStore.getState().setPosition(Math.max(0, Math.round(snapped)));
-    container.setPointerCapture(e.pointerId);
   }, [getTickFromX, snapTick, findClipAt]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -796,17 +786,23 @@ export function TimelineCanvas() {
       }),
       useTransportStore.subscribe(selectTimelineTransportSlice, (state, prev) => {
         if (state.state === "playing" && prev.state !== "playing") {
-          rafRef.current = requestAnimationFrame(animateRef.current);
-        }
-        if (
-          state.state !== "playing" ||
-          prev.state !== state.state ||
-          prev.loopEnabled !== state.loopEnabled ||
-          prev.loopRegion?.startTick !== state.loopRegion?.startTick ||
-          prev.loopRegion?.endTick !== state.loopRegion?.endTick
-        ) {
+          // Transitioning to playing — kick off the RAF animation loop
           cancelAnimationFrame(rafRef.current);
-          draw();
+          rafRef.current = requestAnimationFrame(animateRef.current);
+        } else if (state.state === "playing") {
+          // Already playing — RAF loop handles redraws, nothing to do
+        } else {
+          // Not playing — cancel any RAF loop and draw once for the final state
+          cancelAnimationFrame(rafRef.current);
+          if (
+            prev.state !== state.state ||
+            prev.positionTicks !== state.positionTicks ||
+            prev.loopEnabled !== state.loopEnabled ||
+            prev.loopRegion?.startTick !== state.loopRegion?.startTick ||
+            prev.loopRegion?.endTick !== state.loopRegion?.endTick
+          ) {
+            draw();
+          }
         }
       }, {
         equalityFn: areTimelineTransportSlicesEqual,
@@ -824,30 +820,30 @@ export function TimelineCanvas() {
     };
   }, [commitCommand, executeCommand]);
 
-  // Wheel handler: scroll horizontally, vertically, or zoom with Ctrl
+  // Wheel handler: zoom (default), Shift → horizontal scroll, Ctrl → vertical scroll
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
     const ui = useUIStore.getState();
 
-    if (e.ctrlKey || e.metaKey) {
-      // Zoom horizontally
-      const zoomDelta = e.deltaY > 0 ? -4 : 4;
-      ui.setHorizontalZoom(ui.horizontalZoom + zoomDelta);
-    } else if (e.shiftKey) {
+    if (e.shiftKey) {
       // Horizontal scroll with Shift+wheel
       const { horizontalZoom, scrollX } = ui;
       const pixelsPerTick = horizontalZoom / PPQ;
       const tickDelta = e.deltaY / pixelsPerTick;
       ui.setScrollX(scrollX + tickDelta);
+    } else if (e.ctrlKey || e.metaKey) {
+      // Vertical scroll with Ctrl/Cmd+wheel
+      ui.setScrollY(ui.scrollY + e.deltaY);
     } else {
-      // Vertical scroll (default), horizontal on deltaX
+      // Default: horizontal zoom, handle trackpad deltaX as horizontal scroll
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         const { horizontalZoom, scrollX } = ui;
         const pixelsPerTick = horizontalZoom / PPQ;
         const tickDelta = e.deltaX / pixelsPerTick;
         ui.setScrollX(scrollX + tickDelta);
       } else {
-        ui.setScrollY(ui.scrollY + e.deltaY);
+        const zoomDelta = e.deltaY > 0 ? -4 : 4;
+        ui.setHorizontalZoom(ui.horizontalZoom + zoomDelta);
       }
     }
   }, []);
