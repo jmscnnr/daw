@@ -5,7 +5,7 @@ import { EnvelopePanel } from "./EnvelopePanel";
 import { FilterPanel } from "./FilterPanel";
 import { VolumePanel } from "./VolumePanel";
 import { OscBankPanel } from "./OscBankPanel";
-import { PianoKeyboard } from "./PianoKeyboard";
+import { PianoKeyboard } from "@/components/midi/PianoKeyboard";
 import { usePluginActions } from "@/hooks/use-plugin-actions";
 import type { PluginInstance } from "@/types/plugin";
 import type {
