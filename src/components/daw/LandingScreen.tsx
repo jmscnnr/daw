@@ -13,7 +13,10 @@ interface LandingScreenProps {
 export function LandingScreen({ onOpen }: LandingScreenProps) {
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [loading, setLoading] = useState(true);
+  const [naming, setNaming] = useState(false);
+  const [newName, setNewName] = useState("");
   const newProject = useProjectStore((s) => s.newProject);
+  const setProjectName = useProjectStore((s) => s.setProjectName);
   const loadProjectIntoStore = useProjectStore((s) => s.loadProject);
 
   const refresh = useCallback(() => {
@@ -27,9 +30,21 @@ export function LandingScreen({ onOpen }: LandingScreenProps) {
     refresh();
   }, [refresh]);
 
-  const handleNew = () => {
+  const handleNewClick = () => {
+    setNaming(true);
+    setNewName("");
+  };
+
+  const handleNewConfirm = () => {
+    const name = newName.trim();
     newProject();
+    if (name) setProjectName(name);
     onOpen();
+  };
+
+  const handleNewCancel = () => {
+    setNaming(false);
+    setNewName("");
   };
 
   const handleOpen = async (id: string) => {
@@ -73,16 +88,47 @@ export function LandingScreen({ onOpen }: LandingScreenProps) {
         </div>
 
         {/* New Project */}
-        <button
-          onClick={handleNew}
-          className="mb-6 flex w-full items-center gap-3 rounded-lg border border-synth-border bg-synth-surface px-5 py-4 text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
-        >
-          <Plus size={20} className="text-synth-accent" />
-          <div className="text-left">
-            <div className="text-sm font-medium">New Project</div>
-            <div className="text-xs text-synth-muted">Start with an empty project</div>
+        {naming ? (
+          <div className="mb-6 rounded-lg border border-synth-accent bg-synth-surface px-5 py-4">
+            <label className="mb-2 block text-xs text-synth-muted">Project name</label>
+            <input
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleNewConfirm();
+                if (e.key === "Escape") handleNewCancel();
+              }}
+              placeholder="Untitled Project"
+              className="mb-3 w-full rounded border border-synth-border bg-synth-bg px-3 py-2 text-sm text-synth-text placeholder:text-synth-muted focus:border-synth-accent focus:outline-none"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleNewConfirm}
+                className="rounded bg-synth-accent px-4 py-1.5 text-xs font-medium text-synth-bg transition-opacity hover:opacity-90"
+              >
+                Create
+              </button>
+              <button
+                onClick={handleNewCancel}
+                className="rounded border border-synth-border px-4 py-1.5 text-xs text-synth-muted transition-colors hover:text-synth-text"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-        </button>
+        ) : (
+          <button
+            onClick={handleNewClick}
+            className="mb-6 flex w-full items-center gap-3 rounded-lg border border-synth-border bg-synth-surface px-5 py-4 text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
+          >
+            <Plus size={20} className="text-synth-accent" />
+            <div className="text-left">
+              <div className="text-sm font-medium">New Project</div>
+              <div className="text-xs text-synth-muted">Start with an empty project</div>
+            </div>
+          </button>
+        )}
 
         {/* Recent Projects */}
         {!loading && projects.length > 0 && (

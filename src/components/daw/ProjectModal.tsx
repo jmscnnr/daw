@@ -17,21 +17,40 @@ export function ProjectModal({ open, onClose }: ProjectModalProps) {
   const currentProject = useProjectStore((s) => s.project);
   const loadProjectIntoStore = useProjectStore((s) => s.loadProject);
   const newProject = useProjectStore((s) => s.newProject);
+  const setProjectName = useProjectStore((s) => s.setProjectName);
   const backdropRef = useRef<HTMLDivElement>(null);
+  const [naming, setNaming] = useState(false);
+  const [newName, setNewName] = useState("");
 
   const refresh = useCallback(() => {
     listProjects().then(setProjects).catch(console.error);
   }, []);
 
   useEffect(() => {
-    if (open) refresh();
+    if (open) {
+      refresh();
+      setNaming(false);
+      setNewName("");
+    }
   }, [open, refresh]);
 
-  const handleNew = async () => {
-    // Save current project first
+  const handleNewClick = () => {
+    setNaming(true);
+    setNewName("");
+  };
+
+  const handleNewConfirm = async () => {
     await saveProject(currentProject);
     newProject();
+    const name = newName.trim();
+    if (name) setProjectName(name);
+    setNaming(false);
     onClose();
+  };
+
+  const handleNewCancel = () => {
+    setNaming(false);
+    setNewName("");
   };
 
   const handleOpen = async (id: string) => {
@@ -97,21 +116,54 @@ export function ProjectModal({ open, onClose }: ProjectModalProps) {
         </div>
 
         {/* Actions */}
-        <div className="flex gap-2 border-b border-synth-border px-4 py-3">
-          <button
-            onClick={handleNew}
-            className="flex items-center gap-2 rounded border border-synth-border bg-synth-surface px-3 py-1.5 text-xs text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
-          >
-            <Plus size={14} />
-            New Project
-          </button>
-          <button
-            onClick={handleSave}
-            className="flex items-center gap-2 rounded border border-synth-border bg-synth-surface px-3 py-1.5 text-xs text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
-          >
-            <Save size={14} />
-            Save Now
-          </button>
+        <div className="border-b border-synth-border px-4 py-3">
+          {naming ? (
+            <div>
+              <label className="mb-1.5 block text-xs text-synth-muted">Project name</label>
+              <input
+                autoFocus
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleNewConfirm();
+                  if (e.key === "Escape") handleNewCancel();
+                }}
+                placeholder="Untitled Project"
+                className="mb-2 w-full rounded border border-synth-border bg-synth-bg px-3 py-1.5 text-sm text-synth-text placeholder:text-synth-muted focus:border-synth-accent focus:outline-none"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleNewConfirm}
+                  className="rounded bg-synth-accent px-3 py-1 text-xs font-medium text-synth-bg transition-opacity hover:opacity-90"
+                >
+                  Create
+                </button>
+                <button
+                  onClick={handleNewCancel}
+                  className="rounded border border-synth-border px-3 py-1 text-xs text-synth-muted transition-colors hover:text-synth-text"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={handleNewClick}
+                className="flex items-center gap-2 rounded border border-synth-border bg-synth-surface px-3 py-1.5 text-xs text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
+              >
+                <Plus size={14} />
+                New Project
+              </button>
+              <button
+                onClick={handleSave}
+                className="flex items-center gap-2 rounded border border-synth-border bg-synth-surface px-3 py-1.5 text-xs text-synth-text transition-colors hover:border-synth-accent hover:bg-synth-panel"
+              >
+                <Save size={14} />
+                Save Now
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Project List */}

@@ -2,13 +2,13 @@
 
 import { TransportControls } from "./TransportControls";
 import { useProjectStore } from "@/stores/project-store";
-import { useCommandHistory } from "@/stores/command-history";
-import { SetProjectNameCommand } from "@/commands/track-commands";
 import { useUIStore } from "@/stores/ui-store";
-import { useRef, useState } from "react";
-import { Magnet, Undo2, Redo2, ChevronDown } from "lucide-react";
+import { useState, useCallback } from "react";
+import { Magnet } from "lucide-react";
 import { ProjectModal } from "./ProjectModal";
+import { MenuBar } from "./MenuBar";
 import { WaveformCanvas } from "@/components/synth/WaveformCanvas";
+import { saveProject } from "@/lib/project-db";
 import type { PluginInstance } from "@/types/plugin";
 
 interface ToolbarProps {
@@ -17,108 +17,103 @@ interface ToolbarProps {
 
 export function Toolbar({ selectedPlugin }: ToolbarProps) {
   const [projectModalOpen, setProjectModalOpen] = useState(false);
-  const projectName = useProjectStore((s) => s.project.name);
-  const [editingName, setEditingName] = useState(false);
-  const nameInputRef = useRef<HTMLInputElement>(null);
-  const canUndo = useCommandHistory((s) => s.canUndo);
-  const canRedo = useCommandHistory((s) => s.canRedo);
-  const undo = useCommandHistory((s) => s.undo);
-  const redo = useCommandHistory((s) => s.redo);
+  const [namingNewProject, setNamingNewProject] = useState(false);
+  const [newName, setNewName] = useState("");
   const snapEnabled = useUIStore((s) => s.snapEnabled);
   const toggleSnap = useUIStore((s) => s.toggleSnap);
 
-  return (
-    <div className="flex items-center justify-between border-b border-synth-border bg-daw-toolbar-bg px-3 py-2">
-      {/* Left: Transport */}
-      <TransportControls />
+  const handleNewProject = useCallback(() => {
+    setNamingNewProject(true);
+    setNewName("");
+  }, []);
 
-      {/* Center: Project name + menu */}
-      <div className="flex items-center gap-1">
-        {editingName ? (
-          <input
-            ref={nameInputRef}
-            defaultValue={projectName}
-            autoFocus
-            className="bg-synth-bg text-sm text-synth-text border border-synth-border rounded px-2 py-0.5 text-center outline-none focus:border-synth-accent"
-            onBlur={(e) => {
-              const v = e.target.value.trim();
-              if (v && v !== projectName) {
-                useCommandHistory.getState().execute(new SetProjectNameCommand(v));
-              }
-              setEditingName(false);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              if (e.key === "Escape") {
-                (e.target as HTMLInputElement).value = projectName;
-                (e.target as HTMLInputElement).blur();
-              }
-            }}
-          />
-        ) : (
-          <div
-            className="text-sm text-synth-muted cursor-pointer hover:text-synth-text"
-            onDoubleClick={() => setEditingName(true)}
-            title="Double-click to rename"
+  const handleNewProjectConfirm = useCallback(async () => {
+    const name = newName.trim();
+    const store = useProjectStore.getState();
+    await saveProject(store.project);
+    store.newProject();
+    if (name) store.setProjectName(name);
+    setNamingNewProject(false);
+  }, [newName]);
+
+  const handleNewProjectCancel = useCallback(() => {
+    setNamingNewProject(false);
+    setNewName("");
+  }, []);
+
+  return (
+    <div className="border-b border-synth-border">
+      {/* Menu bar row */}
+      <MenuBar
+        onNewProject={handleNewProject}
+        onOpenProjects={() => setProjectModalOpen(true)}
+      />
+
+      {/* Toolbar row */}
+      <div className="flex items-center justify-between bg-daw-toolbar-bg px-3 py-2">
+        {/* Left: Transport */}
+        <TransportControls />
+
+        {/* Right: Snap + Waveform */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleSnap}
+            className={`flex items-center rounded border px-2 py-1 text-xs transition-colors ${
+              snapEnabled
+                ? "border-synth-accent bg-synth-accent/20 text-synth-accent"
+                : "border-synth-border bg-synth-surface text-synth-muted hover:bg-synth-panel"
+            }`}
+            title="Snap to grid"
           >
-            {projectName}
-          </div>
-        )}
-        <button
-          onClick={() => setProjectModalOpen(true)}
-          className="rounded p-0.5 text-synth-muted transition-colors hover:bg-synth-panel hover:text-synth-text"
-          title="Projects"
-        >
-          <ChevronDown size={14} />
-        </button>
+            <Magnet size={12} className="mr-1" />
+            Snap
+          </button>
+
+          <div className="mx-1 h-5 w-px bg-synth-border" />
+
+          <WaveformCanvas
+            plugin={selectedPlugin}
+            className="relative h-6 w-28 rounded overflow-hidden border border-synth-border"
+          />
+        </div>
       </div>
 
       <ProjectModal open={projectModalOpen} onClose={() => setProjectModalOpen(false)} />
 
-      {/* Right: Snap + Undo/Redo */}
-      <div className="flex items-center gap-2">
-        {/* Snap toggle */}
-        <button
-          onClick={toggleSnap}
-          className={`flex items-center rounded border px-2 py-1 text-xs transition-colors ${
-            snapEnabled
-              ? "border-synth-accent bg-synth-accent/20 text-synth-accent"
-              : "border-synth-border bg-synth-surface text-synth-muted hover:bg-synth-panel"
-          }`}
-          title="Snap to grid"
-        >
-          <Magnet size={12} className="mr-1" />
-          Snap
-        </button>
-
-        <div className="mx-1 h-5 w-px bg-synth-border" />
-
-        {/* Waveform */}
-        <WaveformCanvas
-          plugin={selectedPlugin}
-          className="relative h-6 w-28 rounded overflow-hidden border border-synth-border"
-        />
-
-        <div className="mx-1 h-5 w-px bg-synth-border" />
-
-        {/* Undo/Redo */}
-        <button
-          onClick={undo}
-          disabled={!canUndo}
-          className="flex items-center rounded border border-synth-border bg-synth-surface px-2 py-1 text-xs text-synth-muted transition-colors hover:bg-synth-panel disabled:opacity-30"
-          title="Undo"
-        >
-          <Undo2 size={12} />
-        </button>
-        <button
-          onClick={redo}
-          disabled={!canRedo}
-          className="flex items-center rounded border border-synth-border bg-synth-surface px-2 py-1 text-xs text-synth-muted transition-colors hover:bg-synth-panel disabled:opacity-30"
-          title="Redo"
-        >
-          <Redo2 size={12} />
-        </button>
-      </div>
+      {/* New project naming dialog */}
+      {namingNewProject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-sm rounded-lg border border-synth-border bg-synth-bg p-5 shadow-2xl">
+            <h3 className="mb-3 text-sm font-medium text-synth-text">New Project</h3>
+            <label className="mb-1.5 block text-xs text-synth-muted">Project name</label>
+            <input
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleNewProjectConfirm();
+                if (e.key === "Escape") handleNewProjectCancel();
+              }}
+              placeholder="Untitled Project"
+              className="mb-4 w-full rounded border border-synth-border bg-synth-surface px-3 py-2 text-sm text-synth-text placeholder:text-synth-muted focus:border-synth-accent focus:outline-none"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleNewProjectCancel}
+                className="rounded border border-synth-border px-4 py-1.5 text-xs text-synth-muted transition-colors hover:text-synth-text"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleNewProjectConfirm}
+                className="rounded bg-synth-accent px-4 py-1.5 text-xs font-medium text-synth-bg transition-opacity hover:opacity-90"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
