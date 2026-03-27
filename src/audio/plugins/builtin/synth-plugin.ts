@@ -9,7 +9,7 @@ import type {
 import { EMPTY_AUDIO_DISPLAY } from "@/types/plugin";
 import type { TimedMidiMessage } from "@/audio/midi/types";
 import type { OscConfig } from "@/audio/types";
-import { SynthEngine } from "@/audio/engine";
+import { SynthEngine } from "@/audio/engine/synth-engine";
 import { registerPlugin } from "../plugin-registry";
 import type { IAudioNode } from "standardized-audio-context";
 import type { ComponentType } from "react";

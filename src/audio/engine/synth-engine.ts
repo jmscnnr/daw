@@ -1,4 +1,4 @@
-import type { WorkletMessage, WorkletResponse, OscConfig } from "./types";
+import type { WorkletMessage, WorkletResponse, OscConfig } from "../types";
 import { EMPTY_AUDIO_DISPLAY, type PluginAudioDisplayState } from "@/types/plugin";
 import {
   AudioContext,
