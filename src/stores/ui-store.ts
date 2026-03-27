@@ -7,6 +7,7 @@ interface UIState {
   // Panel layout
   arrangementHeightPercent: number;
   bottomPanelMode: BottomPanelMode;
+  bottomPanelVisible: boolean;
 
   // Selection
   selectedTrackId: string | null;
@@ -24,6 +25,7 @@ interface UIState {
   // Actions
   setArrangementHeight(percent: number): void;
   setBottomPanelMode(mode: BottomPanelMode): void;
+  toggleBottomPanel(): void;
   setSelectedTrack(trackId: string | null): void;
   setSelectedClips(clipIds: string[]): void;
   setEditingClip(clipId: string | null): void;
@@ -36,6 +38,7 @@ interface UIState {
 export const useUIStore = create<UIState>()(subscribeWithSelector((set) => ({
   arrangementHeightPercent: 60,
   bottomPanelMode: "plugin",
+  bottomPanelVisible: true,
 
   selectedTrackId: null,
   selectedClipIds: [],
@@ -53,6 +56,13 @@ export const useUIStore = create<UIState>()(subscribeWithSelector((set) => ({
 
   setBottomPanelMode(mode) {
     set({ bottomPanelMode: mode });
+  },
+
+  toggleBottomPanel() {
+    set((s) => ({
+      bottomPanelVisible: !s.bottomPanelVisible,
+      bottomPanelMode: !s.bottomPanelVisible && s.bottomPanelMode === "none" ? "plugin" : s.bottomPanelMode,
+    }));
   },
 
   setSelectedTrack(trackId) {
