@@ -60,6 +60,21 @@ export class BiquadFilter {
     this.a2 = (1.0 - alpha) / a0;
   }
 
+  /** Flush denormals to zero to prevent CPU spikes on near-silent tails. */
+  private static flush(v: number): number {
+    // Denormals (absolute value < ~1e-38) are extremely slow to process on
+    // most CPUs. Flush them to zero to avoid audio thread overruns.
+    return v + 1.0e-18 - 1.0e-18;
+  }
+
+  /** Reset filter state — call when output has gone bad (NaN/Infinity). */
+  resetState(): void {
+    this.x1 = 0;
+    this.x2 = 0;
+    this.y1 = 0;
+    this.y2 = 0;
+  }
+
   /** Process the buffer in-place and return it. */
   process(x: Float32Array): Float32Array {
     if (!this.active) return x;
@@ -75,6 +90,21 @@ export class BiquadFilter {
       x1 = x0;
       y2 = y1;
       y1 = y0;
+    }
+
+    // Flush denormals and detect NaN/Infinity in feedback state
+    x1 = BiquadFilter.flush(x1);
+    x2 = BiquadFilter.flush(x2);
+    y1 = BiquadFilter.flush(y1);
+    y2 = BiquadFilter.flush(y2);
+
+    // If feedback state has gone bad, reset to prevent permanent silence
+    if (!isFinite(y1) || !isFinite(y2)) {
+      this.x1 = 0;
+      this.x2 = 0;
+      this.y1 = 0;
+      this.y2 = 0;
+      return x;
     }
 
     this.x1 = x1;
